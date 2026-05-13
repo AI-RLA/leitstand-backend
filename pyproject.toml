@@ -1,0 +1,70 @@
+[project]
+name = "leitstand-backend"
+version = "0.1.0"
+description = "Leitstand Backend"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "Jannik Jose" },
+]
+
+dependencies = [
+    "eclipse-zenoh>=1.0.0",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "structlog>=24.1",
+    "sqlalchemy[asyncio]==2.0.36",
+    "asyncpg==0.30.0",
+    "alembic==1.14.0",
+    "geojson-pydantic==1.2.0",
+    "geoalchemy2==0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "httpx",
+]
+
+[project.scripts]
+leitstand-backend = "leitstand_backend.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["leitstand_backend*"]
+
+# ---------------- Ruff ----------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = true
+
+# ---------------- Pytest ----------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+pythonpath = [".", "tests"]
