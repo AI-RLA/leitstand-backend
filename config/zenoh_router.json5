@@ -1,0 +1,57 @@
+// Zenoh router config for the leitstand server.
+
+{
+  mode: "router",
+  listen: {
+    endpoints: [
+      "tcp/[::]:7447",
+    ],
+  },
+  // Multicast scouting on by default. For production
+  // (per-robot bridges over WAN), disable multicast and use explicit
+  // connect-endpoints in each bridge config.
+  transport: {
+    link: {
+      tx: {
+        /// Link lease duration in milliseconds to announce to other zenoh nodes
+        lease: 10000,    // ms — declare session dead after 30s
+        /// NOTE: In order to consider eventual packet loss and transmission latency and jitter,
+        ///       set the actual keep_alive interval to one fourth of the lease time: i.e. send
+        ///       4 keep_alive messages in a lease period. Changing the lease time will have the
+        ///       keep_alive messages sent more or less often.
+        ///       This is in-line with the ITU-T G.8013/Y.1731 specification on continuous connectivity
+        ///       check which considers a link as failed when no messages are received in 3.5 times the
+        ///       target interval.
+        keep_alive: 4,
+      },
+    },
+  },
+  scouting: {
+    multicast: {
+      enabled: true,
+      address: "224.0.0.224:7446",
+      interface: "auto",
+    },
+    gossip: {
+      enabled: true,
+    },
+  },
+  // Storage manager: in-memory backend keyed under `**/_action/**` so
+  // action feedback / status / result are queryable for short windows.
+  // The MCP server's get_action_progress(goal_id, since=...) tool
+  // queries against these keys via session.get(selector).
+  plugins: {
+    storage_manager: {
+      volumes: {
+        memory: {},
+      },
+      storages: {
+        // Action telemetry — short-window history for feedback / status.
+        action_telemetry: {
+          key_expr: "**/_action/**",
+          volume: "memory",
+        },
+      },
+    },
+  },
+}
