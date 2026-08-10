@@ -6,7 +6,7 @@ import asyncio
 import time
 
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 
 from leitstand_backend.adapters.inbound.web.ws.frames import (
@@ -17,6 +17,11 @@ from leitstand_backend.adapters.inbound.web.ws.frames import (
     PongFrame,
     SubscribeFrame,
     UnsubscribeFrame,
+)
+from leitstand_backend.infrastructure.auth import (
+    selected_subprotocol,
+    token_accepted,
+    ws_credential,
 )
 from leitstand_backend.infrastructure.event_bus import EventBus
 
@@ -29,7 +34,13 @@ _PONG_TIMEOUT_S = 10.0
 
 @router.websocket("/ws/v1")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await ws.accept()
+    offered = ws.scope.get("subprotocols") or []
+    if not token_accepted(ws.app.state.settings, ws_credential(offered)):
+        # Closing before accept rejects the handshake itself, so an unauthenticated client never
+        # reaches the bus. This stream carries the whole fleet's live state.
+        await ws.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    await ws.accept(subprotocol=selected_subprotocol(offered))
     await ws.send_json(HelloFrame(version=ws.app.version).model_dump())
     bus: EventBus = ws.app.state.event_bus
     subs: dict[str, asyncio.Task] = {}

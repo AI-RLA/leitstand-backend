@@ -10,18 +10,19 @@ from pydantic import Field as PField
 
 from leitstand_backend.domain.model.mission.mission import MissionStatus, Stage
 from leitstand_backend.domain.model.mission.mission_state import MissionError
+from leitstand_backend.ports.inbound.mission_management import StageInput
 
 
 class MissionCreate(BaseModel):
     name: str = PField(min_length=1, max_length=255)
     description: str | None = None
-    stages: list[Stage] = PField(min_length=1)
+    stages: list[StageInput] = PField(min_length=1)
 
 
 class MissionUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
-    stages: list[Stage] | None = None
+    stages: list[StageInput] | None = None
 
 
 class MissionAssignBody(BaseModel):

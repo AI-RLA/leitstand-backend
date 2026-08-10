@@ -3,30 +3,62 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel
-from pydantic import Field as PField
+from pydantic import BaseModel, Field
 
-from leitstand_backend.domain.model.mission.mission import Mission, Stage
+from leitstand_backend.domain.model.mission.mission import Mission
+from leitstand_backend.domain.model.mission.waypoint import Waypoint
+
+
+class NavigationStageInput(BaseModel):
+    """Drive the robot through an ordered list of waypoints, as requested by a caller.
+
+    Identity is deliberately absent, and that is the point: ``stage_id`` is assigned by the
+    backend, so no caller can choose one. Two stages sharing an id would collapse onto a single
+    ``mission_stage_state`` row, leaving the robot's per-stage reports unattributable.
+    """
+
+    kind: Literal["navigation"] = "navigation"
+    waypoints: list[Waypoint] = Field(
+        min_length=1,
+        description=(
+            "Ordered waypoints to traverse. All waypoints in one stage must share "
+            "their ``kind`` (homogeneity); this is enforced by the backend at "
+            "dispatch, not by this schema."
+        ),
+    )
+    on_cancel: list["StageInput"] | None = Field(
+        default=None,
+        description=(
+            "Cleanup stages executed sequentially when this stage is cancelled. "
+            "Cleanup stages are themselves non-cancellable."
+        ),
+    )
+
+
+StageInput = NavigationStageInput
+
+NavigationStageInput.model_rebuild()
 
 
 class CreateMissionCommand(BaseModel):
-    name: str = PField(min_length=1, max_length=255)
+    name: str = Field(min_length=1, max_length=255)
     description: str | None = None
-    stages: list[Stage] = PField(min_length=1)
+    stages: list[StageInput] = Field(min_length=1)
 
 
 class UpdateMissionCommand(BaseModel):
     mission_id: UUID
     name: str | None = None
     description: str | None = None
-    stages: list[Stage] | None = None
+    stages: list[StageInput] | None = None
 
 
 class AssignMissionCommand(BaseModel):
     mission_id: UUID
-    robot_id: str = PField(min_length=1)
+    robot_id: str = Field(min_length=1)
 
 
 class UnassignMissionCommand(BaseModel):

@@ -26,15 +26,28 @@ from leitstand_backend.application.field_management_service import FieldManageme
 from leitstand_backend.application.fleet_view_service import FleetViewService
 from leitstand_backend.application.mission_management_service import MissionManagementService
 from leitstand_backend.application.site_management_service import SiteManagementService
+from leitstand_backend.application.tool_call_approval_service import ToolCallApprovalService
 from leitstand_backend.domain.errors import MissionDispatchTimeout, MissionRejectedByRobot
+from leitstand_backend.domain.model.audit import (
+    AUTHORITY_APPROVED_PROPOSAL,
+    AUTHORITY_AUTONOMOUS,
+)
 from leitstand_backend.domain.model.mission.mission import Mission
-from leitstand_backend.domain.user import DUMMY_OPERATOR, User
+from leitstand_backend.domain.user import User
+from leitstand_backend.infrastructure.auth import authenticate
 from leitstand_backend.infrastructure.db import (
     ping,
     run_after_commit_callbacks,
     transactional_scope,
 )
 from leitstand_backend.infrastructure.event_bus import EventBus
+from leitstand_backend.infrastructure.provenance import (
+    agent_origin,
+    tool_call_provenance,
+)
+from leitstand_backend.infrastructure.session_scoped_tool_calls import (
+    SessionScopedToolCallRepository,
+)
 from leitstand_backend.infrastructure.transactional_events import TransactionBoundEventPublisher
 from leitstand_backend.ports.inbound.field_management import FieldManagementUseCase
 from leitstand_backend.ports.inbound.fleet_view import FleetViewUseCase
@@ -54,8 +67,15 @@ from leitstand_backend.ports.outbound.robot_state_view import RobotStateView
 from leitstand_backend.ports.outbound.site_repository import SiteRepository
 
 
-def get_current_user() -> User:
-    return DUMMY_OPERATOR
+def get_current_user(request: Request) -> User:
+    """Resolve the caller, or reject the request.
+
+    One shared token cannot say who the caller is, only that they are allowed in, so everyone who
+    passes is the same operator for now. That placeholder id is what every identity column stores,
+    so real identity arrives here, and the rows already keyed to it have to be migrated or purged
+    with it.
+    """
+    return authenticate(request.app.state.settings, request.headers.get("authorization"))
 
 
 async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -83,7 +103,13 @@ async def get_field_repository(
 
 
 def _make_audit_writer(session: AsyncSession, current_user: User | None) -> AuditWriter:
-    """Build an audit writer bound to ``session`` for ``current_user``."""
+    """Build an audit writer bound to ``session`` for ``current_user``.
+
+    Whether the agent performed the write comes from the request's origin; whether anyone approved
+    it comes from the tool call executing, so a turn settling two approvals attributes each write to
+    its own decision. An agent write with no approved call behind it is ``autonomous``, which
+    nothing legitimately produces and so reads as an alarm.
+    """
     user_id_str = str(current_user.id) if current_user is not None else None
     audit = PostgresAuditLogAdapter(session)
 
@@ -93,13 +119,31 @@ def _make_audit_writer(session: AsyncSession, current_user: User | None) -> Audi
         target_id: str | None,
         payload: dict | None,
     ) -> None:
-        await audit.append(
-            action=action,
-            user_id=user_id_str,
-            target_type=target_type,
-            target_id=target_id,
-            payload=payload,
-        )
+        ctx = agent_origin.get()
+        if ctx is None:
+            await audit.append(
+                action=action,
+                user_id=user_id_str,
+                target_type=target_type,
+                target_id=target_id,
+                payload=payload,
+            )
+        else:
+            call = tool_call_provenance.get()
+            approved = call is not None and call.approved
+            await audit.append(
+                action=action,
+                user_id=user_id_str,
+                target_type=target_type,
+                target_id=target_id,
+                payload=payload,
+                actor=ctx.actor,
+                authority=AUTHORITY_APPROVED_PROPOSAL if approved else AUTHORITY_AUTONOMOUS,
+                decided_by=call.approved_by if approved else None,
+                model=ctx.model,
+                prompt_version=ctx.prompt_version,
+                tool_call_id=call.tool_call_id if approved else None,
+            )
 
     return write
 
@@ -271,3 +315,21 @@ def get_site_management_use_case(
     audit: AuditWriter = Depends(get_audit_writer),
 ) -> SiteManagementUseCase:
     return SiteManagementService(repo=repo, audit=audit)
+
+
+def get_tool_call_approval_service(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> ToolCallApprovalService:
+    """Build a ToolCallApprovalService bound to the caller, over per-write transactions.
+
+    The identity comes from the auth seam and never from the request body, so no route can be
+    talked into reading or writing another operator's tool calls. Deliberately not built on
+    get_db_session, which every other use case here does use: a chat turn waits on a remote model,
+    so a request-scoped session would hold a pooled connection for that whole time, and the pool is
+    small enough that a few concurrent chats would starve the REST routes that control robots.
+    """
+    return ToolCallApprovalService(
+        tool_calls=SessionScopedToolCallRepository(request.app.state.session_factory),
+        user=current_user,
+    )

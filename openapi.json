@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leitstand API",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "paths": {
     "/healthz": {
@@ -55,7 +55,8 @@
           "fields"
         ],
         "summary": "List Fields",
-        "operationId": "list_fields_api_v1_fields__get",
+        "description": "List the agricultural fields, each with its name, area in hectares and boundary.",
+        "operationId": "list_fields",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -66,7 +67,7 @@
                     "$ref": "#/components/schemas/FieldView"
                   },
                   "type": "array",
-                  "title": "Response List Fields Api V1 Fields  Get"
+                  "title": "Response List Fields"
                 }
               }
             }
@@ -78,7 +79,8 @@
           "fields"
         ],
         "summary": "Create Field",
-        "operationId": "create_field_api_v1_fields__post",
+        "description": "Create an agricultural field from a name and a GeoJSON polygon boundary.\n\nThe boundary is normally drawn on the map or imported rather than typed.",
+        "operationId": "create_field",
         "requestBody": {
           "content": {
             "application/json": {
@@ -119,7 +121,8 @@
           "fields"
         ],
         "summary": "Get Field",
-        "operationId": "get_field_api_v1_fields__field_id__get",
+        "description": "Return one agricultural field's name, area in hectares and boundary.\n\nIdentify the field by field_id from list_fields, which is also how a field named by the\noperator is resolved.",
+        "operationId": "get_field",
         "parameters": [
           {
             "name": "field_id",
@@ -160,7 +163,8 @@
           "fields"
         ],
         "summary": "Update Field",
-        "operationId": "update_field_api_v1_fields__field_id__patch",
+        "description": "Change a field's name, notes, or boundary. Identify it by field_id from list_fields.",
+        "operationId": "update_field",
         "parameters": [
           {
             "name": "field_id",
@@ -211,7 +215,8 @@
           "fields"
         ],
         "summary": "Delete Field",
-        "operationId": "delete_field_api_v1_fields__field_id__delete",
+        "description": "Delete a field permanently. Identify it by field_id from list_fields.",
+        "operationId": "delete_field",
         "parameters": [
           {
             "name": "field_id",
@@ -247,7 +252,8 @@
           "robots"
         ],
         "summary": "List Robots",
-        "operationId": "list_robots_api_v1_robots_get",
+        "description": "List every robot in the fleet with its live status, battery, connectivity and position.\n\nStatus is one of offline, charging, active or idle. Use this to answer questions about the\nwhole fleet; prefer get_robot when a single robot id is already known.",
+        "operationId": "list_robots",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -258,7 +264,7 @@
                     "$ref": "#/components/schemas/RobotView"
                   },
                   "type": "array",
-                  "title": "Response List Robots Api V1 Robots Get"
+                  "title": "Response List Robots"
                 }
               }
             }
@@ -272,7 +278,8 @@
           "robots"
         ],
         "summary": "Get Robot",
-        "operationId": "get_robot_api_v1_robots__robot_id__get",
+        "description": "Return one robot's live status, battery, connectivity and position by its id.",
+        "operationId": "get_robot",
         "parameters": [
           {
             "name": "robot_id",
@@ -314,8 +321,8 @@
           "missions"
         ],
         "summary": "List Missions",
-        "description": "List missions, newest first, optionally filtered to one robot's missions.",
-        "operationId": "list_missions_api_v1_missions__get",
+        "description": "List missions newest first, each with its lifecycle status and assigned robot.\n\nStatus is one of DRAFT, ASSIGNED, DISPATCHED, RUNNING, PAUSED, SUCCEEDED, FAILED or\nCANCELLED. Optionally filter by robot, by name, or both. This returns mission definitions and\nstatus, not live per-stage progress: use get_mission_state for that.",
+        "operationId": "list_missions",
         "parameters": [
           {
             "name": "robot",
@@ -334,6 +341,24 @@
               "title": "Robot"
             },
             "description": "Filter to missions assigned to this robot id."
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to missions with exactly this name, matched case-insensitively.",
+              "title": "Name"
+            },
+            "description": "Filter to missions with exactly this name, matched case-insensitively."
           }
         ],
         "responses": {
@@ -346,7 +371,7 @@
                   "items": {
                     "$ref": "#/components/schemas/MissionView"
                   },
-                  "title": "Response List Missions Api V1 Missions  Get"
+                  "title": "Response List Missions"
                 }
               }
             }
@@ -368,7 +393,8 @@
           "missions"
         ],
         "summary": "Create Mission",
-        "operationId": "create_mission_api_v1_missions__post",
+        "description": "Create a mission from a name and an ordered list of navigation stages.\n\nEvery waypoint must be a coordinate the operator stated. Do not compute one: not from a field\nor site boundary, not from a robot's current position, and not by converting a distance in\nmetres into degrees. If you were given an area, a row spacing or a bearing rather than\ncoordinates, do not call this; say you cannot work them out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is created as a draft and is not\ndispatched.",
+        "operationId": "create_mission",
         "requestBody": {
           "required": true,
           "content": {
@@ -409,7 +435,8 @@
           "missions"
         ],
         "summary": "Get Mission",
-        "operationId": "get_mission_api_v1_missions__mission_id__get",
+        "description": "Return one mission's definition, lifecycle status and assigned robot.\n\nIdentify the mission by mission_id from list_missions, which is also how a mission named by\nthe operator is resolved.",
+        "operationId": "get_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -450,7 +477,8 @@
           "missions"
         ],
         "summary": "Update Mission",
-        "operationId": "update_mission_api_v1_missions__mission_id__patch",
+        "description": "Change a draft mission's name, description, or stages.\n\nOnly a mission still in DRAFT can be updated. Identify it by mission_id from list_missions.\nSupplying stages replaces the existing ones.",
+        "operationId": "update_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -501,7 +529,8 @@
           "missions"
         ],
         "summary": "Delete Mission",
-        "operationId": "delete_mission_api_v1_missions__mission_id__delete",
+        "description": "Delete a mission permanently.\n\nOnly a draft or already-finished mission can be deleted, and this cannot be undone. Identify\nthe mission by mission_id from list_missions.",
+        "operationId": "delete_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -537,8 +566,8 @@
           "missions"
         ],
         "summary": "Get Mission State",
-        "description": "Return the mission's per-stage runtime state, with errors attributed per stage.",
-        "operationId": "get_mission_state_api_v1_missions__mission_id__state_get",
+        "description": "Return live per-stage progress for one mission, with errors attributed per stage.\n\nEach stage carries a status and a progress fraction. Use this to answer how far along a\nmission is, or why it failed. Identify the mission by mission_id from list_missions.",
+        "operationId": "get_mission_state",
         "parameters": [
           {
             "name": "mission_id",
@@ -581,7 +610,8 @@
           "missions"
         ],
         "summary": "Assign Mission",
-        "operationId": "assign_mission_api_v1_missions__mission_id__assign_post",
+        "description": "Assign a mission to a robot, readying it for dispatch without starting it.\n\nIdentify the mission by mission_id and give the robot_id. To also start it, use\ndispatch_mission instead.",
+        "operationId": "assign_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -634,7 +664,8 @@
           "missions"
         ],
         "summary": "Unassign Mission",
-        "operationId": "unassign_mission_api_v1_missions__mission_id__unassign_post",
+        "description": "Remove the robot assignment from a mission that has not yet been dispatched.\n\nIdentify the mission by mission_id.",
+        "operationId": "unassign_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -677,7 +708,8 @@
           "missions"
         ],
         "summary": "Dispatch Mission",
-        "operationId": "dispatch_mission_api_v1_missions__mission_id__dispatch_post",
+        "description": "Dispatch a mission to a robot and start it driving.\n\nSends the mission to its assigned robot, or to ``robot_id`` when given, and begins execution.\nThe mission must be in DRAFT or ASSIGNED; identify it by ``mission_id`` from list_missions.",
+        "operationId": "dispatch_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -737,7 +769,8 @@
           "missions"
         ],
         "summary": "Cancel Mission",
-        "operationId": "cancel_mission_api_v1_missions__mission_id__cancel_post",
+        "description": "Cancel a mission, stopping the robot if it is running.\n\nIdentify it by mission_id from list_missions.",
+        "operationId": "cancel_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -780,7 +813,8 @@
           "missions"
         ],
         "summary": "Pause Mission",
-        "operationId": "pause_mission_api_v1_missions__mission_id__pause_post",
+        "description": "Pause a running mission, holding the robot in place.\n\nIdentify the mission by mission_id. Use resume_mission to continue it.",
+        "operationId": "pause_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -823,7 +857,8 @@
           "missions"
         ],
         "summary": "Resume Mission",
-        "operationId": "resume_mission_api_v1_missions__mission_id__resume_post",
+        "description": "Resume a paused mission, letting the robot continue.\n\nIdentify it by mission_id.",
+        "operationId": "resume_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -866,7 +901,8 @@
           "missions"
         ],
         "summary": "Reset Mission",
-        "operationId": "reset_mission_api_v1_missions__mission_id__reset_post",
+        "description": "Return a failed or cancelled mission to draft so it can be edited and dispatched again.\n\nIdentify the mission by mission_id.",
+        "operationId": "reset_mission",
         "parameters": [
           {
             "name": "mission_id",
@@ -909,7 +945,8 @@
           "sites"
         ],
         "summary": "List Sites",
-        "operationId": "list_sites_api_v1_sites__get",
+        "description": "List the sites, each a named local frame with its anchor position and map reference.",
+        "operationId": "list_sites",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -920,7 +957,7 @@
                     "$ref": "#/components/schemas/SiteView"
                   },
                   "type": "array",
-                  "title": "Response List Sites Api V1 Sites  Get"
+                  "title": "Response List Sites"
                 }
               }
             }
@@ -932,7 +969,8 @@
           "sites"
         ],
         "summary": "Create Site",
-        "operationId": "create_site_api_v1_sites__post",
+        "description": "Create a site: a named local frame anchored at a GNSS position with a Nav2 map reference.",
+        "operationId": "create_site",
         "requestBody": {
           "content": {
             "application/json": {
@@ -973,7 +1011,8 @@
           "sites"
         ],
         "summary": "Get Site",
-        "operationId": "get_site_api_v1_sites__site_id__get",
+        "description": "Return one site's name, anchor position and map reference by its id.",
+        "operationId": "get_site",
         "parameters": [
           {
             "name": "site_id",
@@ -1014,7 +1053,8 @@
           "sites"
         ],
         "summary": "Update Site",
-        "operationId": "update_site_api_v1_sites__site_id__patch",
+        "description": "Change a site's name, anchor position, or map reference. Identify it by site_id.",
+        "operationId": "update_site",
         "parameters": [
           {
             "name": "site_id",
@@ -1065,7 +1105,8 @@
           "sites"
         ],
         "summary": "Delete Site",
-        "operationId": "delete_site_api_v1_sites__site_id__delete",
+        "description": "Delete a site. Fails if any mission still references it. Identify it by site_id.",
+        "operationId": "delete_site",
         "parameters": [
           {
             "name": "site_id",
@@ -1110,6 +1151,42 @@
                 "schema": {
                   "$ref": "#/components/schemas/User"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/chat": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Chat",
+        "description": "Run one assistant turn and stream it as a Vercel AI UI message stream.\n\nThe caller owns the conversation and sends the whole history every turn; no transcript is\nstored, so there is nothing to restore from this side.\n\nProposed actions never execute on their own: they arrive as tool-approval chunks and pause the\nturn, and the caller returns a decision with the next request. A decision takes effect only\nwhere it matches a proposal this server recorded, and only once, so resending one or changing\nthe action it names actuates nothing.",
+        "operationId": "chat",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "externalDocs": {
+          "description": "Vercel AI SDK stream protocol",
+          "url": "https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol"
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "title": "ChatTurnRequest",
+                "description": "A Vercel AI SDK UI message stream request: the whole conversation so far, plus any decision the operator has made on a proposed action. The shape is defined by the AI SDK, whose client sends it; use that client rather than composing it by hand."
               }
             }
           }
@@ -1369,7 +1446,7 @@
           },
           "stages": {
             "items": {
-              "$ref": "#/components/schemas/NavigationStage-Input"
+              "$ref": "#/components/schemas/NavigationStageInput"
             },
             "type": "array",
             "minItems": 1,
@@ -1498,7 +1575,7 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/NavigationStage-Input"
+                  "$ref": "#/components/schemas/NavigationStageInput"
                 },
                 "type": "array"
               },
@@ -1540,7 +1617,7 @@
           },
           "stages": {
             "items": {
-              "$ref": "#/components/schemas/NavigationStage-Output"
+              "$ref": "#/components/schemas/NavigationStage"
             },
             "type": "array",
             "title": "Stages"
@@ -1611,7 +1688,7 @@
         ],
         "title": "MissionView"
       },
-      "NavigationStage-Input": {
+      "NavigationStage": {
         "properties": {
           "stage_id": {
             "type": "string",
@@ -1622,7 +1699,7 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/NavigationStage-Input"
+                  "$ref": "#/components/schemas/NavigationStage"
                 },
                 "type": "array"
               },
@@ -1671,28 +1748,8 @@
         "title": "NavigationStage",
         "description": "Drive the robot through an ordered list of waypoints."
       },
-      "NavigationStage-Output": {
+      "NavigationStageInput": {
         "properties": {
-          "stage_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Stage Id"
-          },
-          "on_cancel": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/NavigationStage-Output"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "On Cancel",
-            "description": "Cleanup stages executed sequentially when this stage is cancelled. Cleanup stages are themselves non-cancellable."
-          },
           "kind": {
             "type": "string",
             "const": "navigation",
@@ -1721,15 +1778,29 @@
             "minItems": 1,
             "title": "Waypoints",
             "description": "Ordered waypoints to traverse. All waypoints in one stage must share their ``kind`` (homogeneity); this is enforced by the backend at dispatch, not by this schema."
+          },
+          "on_cancel": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NavigationStageInput"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Cancel",
+            "description": "Cleanup stages executed sequentially when this stage is cancelled. Cleanup stages are themselves non-cancellable."
           }
         },
         "type": "object",
         "required": [
-          "stage_id",
           "waypoints"
         ],
-        "title": "NavigationStage",
-        "description": "Drive the robot through an ordered list of waypoints."
+        "title": "NavigationStageInput",
+        "description": "Drive the robot through an ordered list of waypoints, as requested by a caller.\n\nIdentity is deliberately absent, and that is the point: ``stage_id`` is assigned by the\nbackend, so no caller can choose one. Two stages sharing an id would collapse onto a single\n``mission_stage_state`` row, leaving the robot's per-stage reports unattributable."
       },
       "Polygon": {
         "properties": {

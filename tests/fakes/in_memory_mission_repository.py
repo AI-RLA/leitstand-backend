@@ -192,7 +192,9 @@ class InMemoryMissionRepository(MissionRepository):
         # No real row lock in the in-memory fake; tests drive record() calls sequentially.
         return await self.get_record(mission_id)
 
-    async def list_records(self, *, robot_id: str | None = None) -> list[MissionRecord]:
+    async def list_records(
+        self, *, robot_id: str | None = None, name: str | None = None
+    ) -> list[MissionRecord]:
         with self._lock:
             result = []
             for mission in sorted(
@@ -203,6 +205,8 @@ class InMemoryMissionRepository(MissionRepository):
                 rid = assignment[0] if assignment else None
                 dispatched_at = assignment[1] if assignment else None
                 if robot_id is not None and rid != robot_id:
+                    continue
+                if name is not None and mission.name.lower() != name.lower():
                     continue
                 result.append(
                     MissionRecord(

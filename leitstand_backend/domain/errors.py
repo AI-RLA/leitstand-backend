@@ -1,6 +1,7 @@
 """Domain-level errors. Raised by services + adapters at boundaries;
 caught by routers and translated to HTTP status codes."""
 
+from enum import Enum
 from uuid import UUID
 
 from leitstand_backend.domain.model.mission.mission import MissionStatus
@@ -44,13 +45,18 @@ class SiteInUse(DomainError):
 
 
 class StageNotHomogeneous(DomainError):
-    """Waypoints within one stage mix discriminator kinds (e.g., wgs84 + site_local)."""
+    """Waypoints within one stage mix discriminator kinds (e.g., wgs84 + site_local).
 
-    def __init__(self, stage_id: UUID, kinds: set[str]):
+    Identifies the stage by position rather than stage_id: ids are assigned by the backend, so a
+    rejected request has no id its caller would recognise.
+    """
+
+    def __init__(self, stage_index: int, kinds: set[str]):
         super().__init__(
-            f"stage {stage_id} mixes waypoint kinds {sorted(kinds)}; all waypoints in a stage must share kind"
+            f"stage at index {stage_index} mixes waypoint kinds {sorted(kinds)}; "
+            "all waypoints in a stage must share kind"
         )
-        self.stage_id = stage_id
+        self.stage_index = stage_index
         self.kinds = kinds
 
 
@@ -115,8 +121,11 @@ class RobotFactsheetMissing(DomainError):
 class InvalidMissionTransition(DomainError):
     """The (state, trigger) pair is not in the allowed-transitions table."""
 
-    def __init__(self, current: MissionStatus, trigger: str):
-        super().__init__(f"cannot apply {trigger!r} to mission in state {current}")
+    def __init__(self, current: MissionStatus, trigger: str | Enum):
+        # This message reaches an audit record, and an enum member's repr would carry its class
+        # and value there.
+        name = trigger.value if isinstance(trigger, Enum) else trigger
+        super().__init__(f"cannot apply {name!r} to mission in state {current}")
         self.current = current
         self.trigger = trigger
 

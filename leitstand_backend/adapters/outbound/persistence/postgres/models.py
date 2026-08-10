@@ -22,6 +22,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    desc,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
@@ -63,6 +64,13 @@ class FieldRow(Base):
 class AuditLogRow(Base):
     __tablename__ = "audit_log"
 
+    __table_args__ = (
+        Index("audit_log_ts_idx", desc("ts")),
+        Index("audit_log_user_idx", "user_id"),
+        Index("audit_log_target_idx", "target_id"),
+        Index("audit_log_target_type_idx", "target_type"),
+    )
+
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -70,6 +78,14 @@ class AuditLogRow(Base):
     target_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Provenance: what performed the action, on what authority, and the link back to the agent
+    # turn. Denormalised here rather than joined to the chat tables, which face a shorter retention.
+    actor: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'human'"))
+    authority: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'direct'"))
+    decided_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_call_id: Mapped[UUID | None] = mapped_column(nullable=True)
 
 
 class MissionRow(Base):
@@ -162,4 +178,29 @@ class MissionSiteRefRow(Base):
     mission_id: Mapped[UUID] = mapped_column(primary_key=True)
     site_id: Mapped[UUID] = mapped_column(
         ForeignKey("sites.site_id", ondelete="RESTRICT"), primary_key=True
+    )
+
+
+class ToolCallRow(Base):
+    """An agent's proposed fleet-changing tool call, tracked from the gate to its outcome."""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (Index("ix_tool_calls_owner_call", "user_id", "provider_tool_call_id"),)
+
+    id: Mapped[UUID] = mapped_column(
+        primary_key=True, default=uuid4, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_tool_call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    arguments: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )

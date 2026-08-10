@@ -12,7 +12,8 @@ from uuid import UUID
 import structlog
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
@@ -30,6 +31,7 @@ from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_factsheet_ad
 from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_telemetry_adapter import (
     ZenohRobotTelemetryAdapter,
 )
+from leitstand_backend.adapters.inbound.web.chat.routes import router as chat_router
 from leitstand_backend.adapters.inbound.web.fields.routes import router as fields_router
 from leitstand_backend.adapters.inbound.web.missions.routes import router as missions_router
 from leitstand_backend.adapters.inbound.web.robots.routes import router as robots_router
@@ -37,6 +39,11 @@ from leitstand_backend.adapters.inbound.web.shared.health import router as healt
 from leitstand_backend.adapters.inbound.web.sites.routes import router as sites_router
 from leitstand_backend.adapters.inbound.web.users.routes import router as users_router
 from leitstand_backend.adapters.inbound.web.ws.routes import router as ws_router
+from leitstand_backend.adapters.outbound.llm.agent_factory import (
+    build_chat_agent,
+    system_prompt_version,
+)
+from leitstand_backend.adapters.outbound.llm.domain_mcp import build_domain_mcp
 from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_dispatcher_adapter import (
     ZenohMissionDispatcherAdapter,
 )
@@ -54,16 +61,19 @@ from leitstand_backend.application.robot_telemetry_service import RobotTelemetry
 from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.model.mission.mission import Mission
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
+from leitstand_backend.infrastructure.auth import CredentialContextMiddleware
 from leitstand_backend.infrastructure.db import (
     create_engine,
     create_session_factory,
     ping,
     transactional_scope,
 )
+from leitstand_backend.infrastructure.deps import get_current_user
 from leitstand_backend.infrastructure.event_bus import EventBus
 from leitstand_backend.infrastructure.factsheet_view import EventBusBackedRobotFactsheetView
 from leitstand_backend.infrastructure.messaging.zenoh import zenoh_session
 from leitstand_backend.infrastructure.middleware import RequestIdMiddleware
+from leitstand_backend.infrastructure.provenance import AgentOrigin
 from leitstand_backend.infrastructure.robot_status_projector import (
     RobotStatusProjector,
     SessionScopedRobotStatusReadModel,
@@ -378,11 +388,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.connectivity_uc = connectivity_uc
         app.state.connectivity_adapter = connectivity_adapter
         app.state.robot_status_projector = robot_status_projector
+
+        # Nothing here dials the model: the agent is built from configuration alone, so an
+        # unreachable model on its separate box can never fail startup.
+        app.state.chat_agent = None
+        chat_mcp_client = None
+        if settings.chat_enabled:
+            try:
+                origin = AgentOrigin(
+                    model=settings.llm_model, prompt_version=system_prompt_version()
+                )
+                domain_mcp, chat_mcp_client = build_domain_mcp(app, origin)
+                app.state.chat_agent = build_chat_agent(settings, domain_mcp)
+                logger.info(
+                    "chat_enabled", model=settings.llm_model, base_url=settings.llm_base_url
+                )
+            except Exception:  # noqa: BLE001 - chat must never take the backend down
+                logger.exception("chat_init_failed_continuing_without_chat")
+                app.state.chat_agent = None
+        else:
+            logger.info("chat_disabled")
+
         logger.info("leitstand_started", endpoint=settings.zenoh_endpoint)
 
         try:
             yield
         finally:
+            if chat_mcp_client is not None:
+                try:
+                    await chat_mcp_client.aclose()
+                except Exception:  # noqa: BLE001
+                    logger.warning("chat_mcp_client_close_error")
             if robot_status_projector is not None:
                 try:
                     await robot_status_projector.aclose()
@@ -411,17 +447,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="Leitstand API", version=_pkg_version("leitstand-backend"), lifespan=lifespan
     )
+    # Bound here rather than only in lifespan so that authentication, which every request needs,
+    # does not depend on startup having run.
+    app.state.settings = settings
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(CredentialContextMiddleware)
+
+    if settings.cors_origins:
+        # No allow_credentials: this API authenticates with a bearer header, and asking for
+        # cookie credentials would only widen what a browser will send cross-origin.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # asyncpg can leak ConnectionError unwrapped on initial connect, so register both.
     app.add_exception_handler(OperationalError, _db_unavailable)
     app.add_exception_handler(ConnectionError, _db_unavailable)
 
+    # Health stays open: an orchestrator probes it and holds no credential. Everything under /api/v1
+    # is gated here rather than route by route, so a new router is closed by default.
+    protected = [Depends(get_current_user)]
     app.include_router(health_router)
-    app.include_router(fields_router)
-    app.include_router(robots_router)
-    app.include_router(missions_router)
-    app.include_router(sites_router)
-    app.include_router(users_router)
+    app.include_router(fields_router, dependencies=protected)
+    app.include_router(robots_router, dependencies=protected)
+    app.include_router(missions_router, dependencies=protected)
+    app.include_router(sites_router, dependencies=protected)
+    app.include_router(users_router, dependencies=protected)
     app.include_router(ws_router)
+    app.include_router(chat_router, dependencies=protected)
     return app

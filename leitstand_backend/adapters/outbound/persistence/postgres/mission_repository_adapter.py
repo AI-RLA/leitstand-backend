@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -317,10 +317,18 @@ class PostgresMissionRepositoryAdapter(MissionRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_record(row) if row else None
 
-    async def list_records(self, *, robot_id: str | None = None) -> list[MissionRecord]:
-        stmt = select(MissionRow).order_by(MissionRow.created_at.desc())
+    async def list_records(
+        self, *, robot_id: str | None = None, name: str | None = None
+    ) -> list[MissionRecord]:
+        stmt = (
+            select(MissionRow)
+            .where(MissionRow.update_id == 0)
+            .order_by(MissionRow.created_at.desc())
+        )
         if robot_id is not None:
             stmt = stmt.where(MissionRow.robot_id == robot_id)
+        if name is not None:
+            stmt = stmt.where(func.lower(MissionRow.name) == name.lower())
         result = await self._session.execute(stmt)
         return [_to_record(row) for row in result.scalars()]
 

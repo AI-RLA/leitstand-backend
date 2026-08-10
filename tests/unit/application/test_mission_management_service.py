@@ -19,10 +19,7 @@ from leitstand_backend.domain.errors import (
     UnsupportedStageKind,
     UnsupportedWaypointFrame,
 )
-from leitstand_backend.domain.model.mission.mission import (
-    MissionStatus,
-    NavigationStage,
-)
+from leitstand_backend.domain.model.mission.mission import MissionStatus
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
 from leitstand_backend.domain.model.robot.robot_factsheet import (
     NavigationCapability,
@@ -33,6 +30,7 @@ from leitstand_backend.ports.inbound.mission_management import (
     CancelMissionCommand,
     CreateMissionCommand,
     DispatchMissionCommand,
+    NavigationStageInput,
     PauseMissionCommand,
     ResetMissionCommand,
     ResumeMissionCommand,
@@ -49,27 +47,20 @@ ROBOT_ID = "scout-mini-04"
 SITE_ID = UUID("11111111-1111-1111-1111-111111111111")
 
 
-def _wgs84_stage() -> NavigationStage:
-    return NavigationStage(
-        stage_id=uuid4(),
-        waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)],
-    )
+def _wgs84_stage() -> NavigationStageInput:
+    return NavigationStageInput(waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)])
 
 
-def _site_local_stage(site_id: UUID = SITE_ID) -> NavigationStage:
-    return NavigationStage(
-        stage_id=uuid4(),
-        waypoints=[SiteLocalWaypoint(site_id=site_id, x=1.0, y=0.5)],
-    )
+def _site_local_stage(site_id: UUID = SITE_ID) -> NavigationStageInput:
+    return NavigationStageInput(waypoints=[SiteLocalWaypoint(site_id=site_id, x=1.0, y=0.5)])
 
 
-def _mixed_frame_stage() -> NavigationStage:
-    return NavigationStage(
-        stage_id=uuid4(),
+def _mixed_frame_stage() -> NavigationStageInput:
+    return NavigationStageInput(
         waypoints=[
             WGS84Waypoint(lat=52.3, lon=8.05),
             SiteLocalWaypoint(site_id=SITE_ID, x=1.0, y=0.5),
-        ],
+        ]
     )
 
 
@@ -138,10 +129,97 @@ async def test_create_persists_mission_and_audits():
 
 
 @pytest.mark.asyncio
+async def test_create_assigns_every_stage_a_distinct_id():
+    """Stage identity is the backend's to assign, and it must be unique per stage.
+
+    ``mission_stage_state`` is keyed ``(mission_id, stage_id)``, so two stages sharing an id
+    collapse onto one row: the second robot report silently overwrites the first and neither
+    stage can be told apart afterwards. Nothing validates against that, so the guarantee has to
+    come from ids never being chosen by a caller.
+    """
+    svc, _, _, _, _, _ = _make_svc()
+
+    mission = await svc.create(
+        CreateMissionCommand(name="m1", stages=[_wgs84_stage(), _wgs84_stage()])
+    )
+
+    ids = [stage.stage_id for stage in mission.stages]
+    assert len(set(ids)) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_cannot_choose_a_stage_id():
+    """The property the whole split exists for, asserted from the wire shape inwards.
+
+    A caller that supplies stage_id gets it ignored rather than honoured, so no client can
+    reserve, collide with, or overwrite a stage's identity.
+    """
+    svc, _, _, _, _, _ = _make_svc()
+    chosen = uuid4()
+    cmd = CreateMissionCommand.model_validate(
+        {
+            "name": "m1",
+            "stages": [
+                {
+                    "kind": "navigation",
+                    "stage_id": str(chosen),
+                    "waypoints": [{"kind": "wgs84", "lat": 52.3, "lon": 8.05}],
+                }
+            ],
+        }
+    )
+
+    mission = await svc.create(cmd)
+
+    assert mission.stages[0].stage_id != chosen
+
+
+@pytest.mark.asyncio
+async def test_create_assigns_ids_to_cleanup_stages_too():
+    """on_cancel stages are stages: the robot reports them under the same stage_id join."""
+    svc, _, _, _, _, _ = _make_svc()
+    stage = NavigationStageInput(
+        waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)],
+        on_cancel=[NavigationStageInput(waypoints=[WGS84Waypoint(lat=52.4, lon=8.06)])],
+    )
+
+    mission = await svc.create(CreateMissionCommand(name="m1", stages=[stage]))
+
+    cleanup = mission.stages[0].on_cancel
+    assert cleanup is not None
+    assert cleanup[0].stage_id != mission.stages[0].stage_id
+
+
+@pytest.mark.asyncio
+async def test_update_assigns_ids_to_replacement_stages():
+    svc, _, _, _, _, _ = _make_svc()
+    created = await svc.create(CreateMissionCommand(name="m1", stages=[_wgs84_stage()]))
+
+    updated = await svc.update(
+        UpdateMissionCommand(mission_id=created.mission_id, stages=[_wgs84_stage()])
+    )
+
+    assert isinstance(updated.stages[0].stage_id, UUID)
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_mixed_frame_stage():
     svc, _, _, _, _, _ = _make_svc()
     with pytest.raises(StageNotHomogeneous):
         await svc.create(CreateMissionCommand(name="m1", stages=[_mixed_frame_stage()]))
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_stage_is_identified_by_position():
+    """A rejected request has no server-assigned ids, so position is all the caller can act on."""
+    svc, _, _, _, _, _ = _make_svc()
+
+    with pytest.raises(StageNotHomogeneous) as raised:
+        await svc.create(
+            CreateMissionCommand(name="m1", stages=[_wgs84_stage(), _mixed_frame_stage()])
+        )
+
+    assert raised.value.stage_index == 1
 
 
 @pytest.mark.asyncio
@@ -293,6 +371,14 @@ async def test_dispatch_marks_mission_failed_on_robot_reject():
     assert await repo.get_status(mission.mission_id) is MissionStatus.FAILED
     assert [t for t, _, _ in events.published if t.endswith("/dispatched")] == []
     assert [c for c in audit_calls if c["action"] == "mission.dispatch"] == []
+    # The refusal is a state change and has to leave a record of its own: auditing only successes
+    # would leave the FAILED mission, its robot assignment and its error with nothing naming who
+    # caused them, which is the direction an incident review reads.
+    (failed,) = [c for c in audit_calls if c["action"] == "mission.dispatch_failed"]
+    assert failed["target_id"] == str(mission.mission_id)
+    assert failed["payload"]["robot_id"] == ROBOT_ID
+    assert failed["payload"]["error_type"] == "dispatch_rejected"
+    assert failed["payload"]["reason"] == "manual rejection"
     record = await repo.get_record(mission.mission_id)
     assert record is not None and record.failure_errors is not None
     assert record.failure_errors[0].type == "dispatch_rejected"
@@ -302,9 +388,10 @@ async def test_dispatch_marks_mission_failed_on_robot_reject():
 
 @pytest.mark.asyncio
 async def test_dispatch_marks_mission_failed_on_timeout():
-    svc, repo, dispatcher, factsheets, _, _ = _make_svc()
+    svc, repo, dispatcher, factsheets, _, audit_calls = _make_svc()
     factsheets.set(_factsheet())
     mission = await svc.create(CreateMissionCommand(name="m1", stages=[_wgs84_stage()]))
+    audit_calls.clear()
 
     async def timeout(_mission, robot_id):
         raise MissionDispatchTimeout(_mission.mission_id, robot_id)
@@ -318,6 +405,8 @@ async def test_dispatch_marks_mission_failed_on_timeout():
     record = await repo.get_record(mission.mission_id)
     assert record is not None and record.failure_errors is not None
     assert record.failure_errors[0].type == "dispatch_timeout"
+    (failed,) = [c for c in audit_calls if c["action"] == "mission.dispatch_failed"]
+    assert failed["payload"]["error_type"] == "dispatch_timeout"
 
 
 # ----------------------------------------------------------------------------

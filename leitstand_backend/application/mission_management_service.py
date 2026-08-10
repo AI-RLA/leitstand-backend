@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -24,6 +25,8 @@ from leitstand_backend.domain.errors import (
 from leitstand_backend.domain.model.mission.mission import (
     Mission,
     MissionStatus,
+    NavigationStage,
+    Stage,
     StageKind,
     referenced_site_ids,
 )
@@ -49,6 +52,7 @@ from leitstand_backend.ports.inbound.mission_management import (
     PauseMissionCommand,
     ResetMissionCommand,
     ResumeMissionCommand,
+    StageInput,
     UnassignMissionCommand,
     UpdateMissionCommand,
 )
@@ -86,7 +90,7 @@ class MissionManagementService(MissionManagementUseCase):
             mission_id=uuid4(),
             name=command.name,
             description=command.description,
-            stages=command.stages,
+            stages=_with_ids(command.stages),
             created_at=now,
             updated_at=now,
         )
@@ -114,7 +118,7 @@ class MissionManagementService(MissionManagementUseCase):
             "description": (
                 command.description if command.description is not None else before.description
             ),
-            "stages": command.stages if command.stages is not None else before.stages,
+            "stages": (_with_ids(command.stages) if command.stages is not None else before.stages),
             "updated_at": datetime.now(timezone.utc),
         }
         _validate_homogeneity(patch["stages"])
@@ -237,6 +241,12 @@ class MissionManagementService(MissionManagementUseCase):
                 MissionStatus.FAILED,
                 MissionTrigger.REJECT,
                 reason=error.description,
+            )
+            await self._audit(
+                "mission.dispatch_failed",
+                "mission",
+                str(command.mission_id),
+                {"robot_id": robot_id, "error_type": error_type, "reason": error.description},
             )
             raise
 
@@ -385,12 +395,29 @@ class MissionManagementService(MissionManagementUseCase):
 _PRE_DISPATCH_STATES = frozenset({MissionStatus.DRAFT, MissionStatus.ASSIGNED})
 
 
+def _with_ids(inputs: Sequence[StageInput]) -> list[Stage]:
+    """Assign each requested stage its identity.
+
+    Recurses into ``on_cancel`` because cleanup stages are stages: the robot reports their
+    execution under the same ``stage_id`` join, so one without an id would be unattributable.
+    """
+    return [
+        NavigationStage(
+            stage_id=uuid4(),
+            kind=stage.kind,
+            waypoints=stage.waypoints,
+            on_cancel=_with_ids(stage.on_cancel) if stage.on_cancel else None,
+        )
+        for stage in inputs
+    ]
+
+
 def _validate_homogeneity(stages) -> None:
     """All waypoints in a stage must share their ``kind`` discriminator."""
-    for stage in stages:
+    for index, stage in enumerate(stages):
         kinds = {wp.kind for wp in stage.waypoints}
         if len(kinds) > 1:
-            raise StageNotHomogeneous(stage.stage_id, kinds)
+            raise StageNotHomogeneous(index, kinds)
 
 
 def _validate_against_factsheet(

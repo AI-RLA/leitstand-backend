@@ -125,3 +125,30 @@ def test_core_layers_only_import_allowlisted_externals() -> None:
                 if not _is_permitted_in_core(mod):
                     violations.append(f"{py_file.relative_to(ROOT)}: imports {mod}")
     assert violations == [], "\n".join(violations)
+
+
+# An audit row must commit with the fact it asserts, which holds only where the adapter is built on
+# that transaction's session. Constructing it anywhere else could land the write outside one.
+_AUDIT_WRITE_SEAMS = frozenset(
+    {
+        "infrastructure/deps.py",
+        "adapters/outbound/persistence/postgres/tool_call_repository_adapter.py",
+    }
+)
+
+
+def test_audit_log_is_written_only_at_its_two_seams() -> None:
+    writers: set[str] = set()
+    for py_file in ROOT.rglob("*.py"):
+        tree = ast.parse(py_file.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "PostgresAuditLogAdapter"
+            ):
+                writers.add(str(py_file.relative_to(ROOT)))
+    unexpected = writers - _AUDIT_WRITE_SEAMS
+    missing = _AUDIT_WRITE_SEAMS - writers
+    assert not unexpected, f"audit_log written outside its sanctioned seams: {sorted(unexpected)}"
+    assert not missing, f"expected audit_log write seam missing: {sorted(missing)}"

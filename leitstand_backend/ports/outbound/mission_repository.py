@@ -125,10 +125,13 @@ class MissionRepository(ABC):
         """
 
     @abstractmethod
-    async def list_records(self, *, robot_id: str | None = None) -> list[MissionRecord]:
+    async def list_records(
+        self, *, robot_id: str | None = None, name: str | None = None
+    ) -> list[MissionRecord]:
         """Return missions as full records, newest first.
 
-        ``robot_id`` filters to that robot's missions; omitted returns all.
+        ``robot_id`` filters to that robot's missions and ``name`` matches case-insensitively;
+        each omitted filter widens the result. Both together are an AND.
         """
 
     @abstractmethod

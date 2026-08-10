@@ -116,6 +116,22 @@ or a `.env` file.
 | `LEITSTAND_DATABASE_URL` | `postgresql+asyncpg://leitstand:leitstand@localhost:5432/leitstand` | async SQLAlchemy URL |
 | `LEITSTAND_AUTO_MIGRATE` | `true` | run `alembic upgrade head` on startup |
 | `LEITSTAND_DB_POOL_SIZE` | `10` | SQLAlchemy connection pool size |
+| `LEITSTAND_AUTH_BEARER_TOKEN` | unset | required on REST and the WS handshake when set |
+| `LEITSTAND_CORS_ORIGINS` | empty | comma-separated or JSON list (middleware added only when non-empty) |
+| `LEITSTAND_LLM_BASE_URL` | `http://localhost:8000/v1` | any OpenAI-compatible endpoint |
+| `LEITSTAND_LLM_API_KEY` | unset | API key, if the endpoint needs one |
+| `LEITSTAND_LLM_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | model name |
+| `LEITSTAND_LLM_CONNECT_TIMEOUT_S` | `3` | connect timeout |
+| `LEITSTAND_LLM_READ_TIMEOUT_S` | `60` | read timeout |
+| `LEITSTAND_LLM_REASONING` | `off` | `off` disables the model's chain of thought |
+| `LEITSTAND_CHAT_ENABLED` | `true` | expose `POST /api/v1/chat` |
+| `LEITSTAND_CHAT_MAX_TOOL_CALLS` | `10` | max tool calls per turn |
+
+If the LLM is unreachable, only AI chat assistant fails.
+
+Authentication is one shared token. Every caller resolves to the same operator, and
+there is no authorization, so any authenticated caller can dispatch any robot or
+delete any field. Real identity (OIDC) and per-user permissions are not built yet (TODO).
 
 ## Deployment
 
