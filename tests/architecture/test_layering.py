@@ -71,7 +71,7 @@ _CORE_LAYER_ALLOWED_EXTERNALS = frozenset(
     {
         "pydantic",  # domain modeling (Robot, Field, Commands, etc.)
         "geojson_pydantic",  # Pydantic-typed GeoJSON for Field.geometry
-        "structlog",  # logging — cross-cutting; ADR 0007 "earn it" excludes
+        "structlog",  # logging — a cross-cutting concern, permitted in the core
     }
 )
 
@@ -115,9 +115,8 @@ def test_core_layers_only_import_allowlisted_externals() -> None:
     library to a core layer requires a deliberate allowlist amendment
     in this file, which forces architectural review.
 
-    Locks ADR 0017 + 0018's intent machine-side; prevents drift back to
-    the AsyncSession-in-service pattern fixed by the transactional_scope
-    boundary-owned-transaction refactor.
+    Enforced machine-side so the inward-only dependency rule cannot silently
+    erode (e.g. an AsyncSession or messaging client leaking into a service).
     """
     violations: list[str] = []
     for layer in _CORE_LAYERS:

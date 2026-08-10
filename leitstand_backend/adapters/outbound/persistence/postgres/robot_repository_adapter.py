@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from leitstand_backend.adapters.outbound.persistence.postgres.models import RobotRow
-from leitstand_backend.domain.model.robot import Metadata, Robot
+from leitstand_backend.domain.model.robot.robot import Metadata, Robot
 from leitstand_backend.ports.outbound.robot_repository import RobotRepository
 
 
@@ -63,7 +63,6 @@ class PostgresRobotRepositoryAdapter(RobotRepository):
         col = {
             "pose": RobotRow.last_pose,
             "battery": RobotRow.last_battery,
-            "state": RobotRow.last_state,
         }.get(kind)
         if col is None:
             raise ValueError(f"unknown telemetry kind: {kind!r}")

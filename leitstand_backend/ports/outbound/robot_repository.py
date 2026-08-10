@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from leitstand_backend.domain.model.robot import Metadata, Robot
+from leitstand_backend.domain.model.robot.robot import Metadata, Robot
 
 
 class RobotRepository(ABC):

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
 
-from leitstand_backend.domain.model.robot import Metadata, Robot
+from leitstand_backend.domain.model.robot.robot import Metadata, Robot
 
 
 class RecordOnlineCommand(BaseModel):

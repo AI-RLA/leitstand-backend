@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
 
-from leitstand_backend.domain.model.telemetry import Battery, Pose
+from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
 
 
 class RecordPoseCommand(BaseModel):

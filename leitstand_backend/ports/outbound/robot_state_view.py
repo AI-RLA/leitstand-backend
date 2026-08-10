@@ -1,14 +1,14 @@
-"""RobotStateView driven port: latest pose / battery / state per robot."""
+"""RobotStateView driven port: latest pose / battery per robot."""
 
 from abc import ABC, abstractmethod
 
-from leitstand_backend.domain.model.telemetry import Battery, Pose, RobotState
+from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
 
 
 class RobotStateView(ABC):
     """Latest known telemetry per robot.
 
-    Domain port for read-side access to the latest reported state
+    Domain port for read-side access to the latest reported telemetry
     values. Implementation may use any cache, store, or
     last-known-state source.
     """
@@ -18,6 +18,3 @@ class RobotStateView(ABC):
 
     @abstractmethod
     def latest_battery(self, robot_id: str) -> Battery | None: ...
-
-    @abstractmethod
-    def latest_state(self, robot_id: str) -> RobotState | None: ...

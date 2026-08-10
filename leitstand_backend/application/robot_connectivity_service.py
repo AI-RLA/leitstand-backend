@@ -2,7 +2,8 @@
 
 import structlog
 
-from leitstand_backend.domain.model.robot import Robot
+from leitstand_backend.domain import event_topics
+from leitstand_backend.domain.model.robot.robot import Robot
 from leitstand_backend.ports.inbound.robot_connectivity import (
     RecordOfflineCommand,
     RecordOnlineCommand,
@@ -22,7 +23,7 @@ class RobotConnectivityService(RobotConnectivityUseCase):
     async def record_online(self, command: RecordOnlineCommand) -> Robot:
         robot = await self._repo.record_online(command.robot_id, command.metadata)
         self._events.publish(
-            "events.registry",
+            event_topics.REGISTRY,
             {"type": "robot.online", "robot_id": command.robot_id},
             latch=False,
         )
@@ -32,7 +33,7 @@ class RobotConnectivityService(RobotConnectivityUseCase):
         robot = await self._repo.record_offline(command.robot_id)
         if robot is not None:
             self._events.publish(
-                "events.registry",
+                event_topics.REGISTRY,
                 {"type": "robot.offline", "robot_id": command.robot_id},
                 latch=False,
             )

@@ -27,6 +27,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        contract-src: ../leitstand-robot-contract
     environment:
       LEITSTAND_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-leitstand}:${POSTGRES_PASSWORD:-leitstand}@postgres:5432/${POSTGRES_DB:-leitstand}
       LEITSTAND_ZENOH_ENDPOINT: tcp/zenoh-router:7447

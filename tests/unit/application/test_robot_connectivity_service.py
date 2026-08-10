@@ -7,7 +7,7 @@ import pytest
 from leitstand_backend.application.robot_connectivity_service import (
     RobotConnectivityService,
 )
-from leitstand_backend.domain.model.robot import Metadata
+from leitstand_backend.domain.model.robot.robot import Metadata
 from leitstand_backend.ports.inbound.robot_connectivity import (
     RecordOfflineCommand,
     RecordOnlineCommand,
@@ -30,7 +30,7 @@ async def test_record_online_stores_robot_and_publishes_event() -> None:
     assert robot.id == "r1"
     stored = await repo.get("r1")
     assert stored is not None and stored.online
-    registry_events = [p for t, p, _ in pub.published if t == "events.registry"]
+    registry_events = [p for t, p, _ in pub.published if t == "events/registry"]
     assert len(registry_events) == 1
     assert registry_events[0] == {"type": "robot.online", "robot_id": "r1"}
 
@@ -48,7 +48,7 @@ async def test_record_offline_marks_robot_offline_and_publishes_event() -> None:
 
     stored = await repo.get("r1")
     assert stored is not None and not stored.online
-    offline_events = [p for t, p, _ in pub.published if t == "events.registry"]
+    offline_events = [p for t, p, _ in pub.published if t == "events/registry"]
     assert len(offline_events) == 1
     assert offline_events[0]["type"] == "robot.offline"
     # telemetry snapshots are preserved (unlatch removed) so last-known state

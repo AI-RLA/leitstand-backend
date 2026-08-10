@@ -1,8 +1,8 @@
 # leitstand-backend
 
 Backend service for the leitstand fleet-control platform.
-Discovers robots as they come online, persists their state, and
-exposes a REST + WebSocket API to operator clients.
+Discovers robots as they come online, manages missions and sites,
+persists state, and exposes a REST + WebSocket API to operator clients.
 
 ## Module layout
 
@@ -80,10 +80,12 @@ each registered robot (`<id>` is the robot's slug) it consumes:
 | `leitstand/robot/<id>/metadata` | queryable | identity JSON (`{"id": "<id>", ...}`), queried once at registration |
 | `leitstand/robot/<id>/pose` | publication | pose telemetry |
 | `leitstand/robot/<id>/battery` | publication | battery telemetry |
-| `leitstand/robot/<id>/state` | publication | operational state |
 
-The robot-side producer of these keys is `leitstand-robot-client`.
-Full details (payload schemas, threading model) are in
+The backend also dispatches missions and consumes execution state, factsheets, and
+pause/resume over the `.../mission/*`, `.../factsheet`, and `.../instant/*` keys; the
+`leitstand-robot-contract` repo is the authoritative wire spec for those proto channels.
+The robot-side producer of all these keys is `leitstand-robot-client`. Full details
+(payload schemas, threading model) are in
 `leitstand_backend/adapters/inbound/messaging/zenoh/`.
 
 ## HTTP REST API
@@ -131,9 +133,13 @@ below.
 
 ## Development
 
+The sibling `leitstand-robot-contract` repo must be checked out next to this one
+(`../leitstand-robot-contract`); `make dev-install` installs it editable before the
+backend, and the Docker build reads it via `additional_contexts`.
+
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+make dev-install   # editable contract, then the backend + dev deps
 make check         # ruff + format-check + tests
 make openapi       # regenerate openapi.json
 ```
@@ -142,12 +148,10 @@ make openapi       # regenerate openapi.json
 
 ### Running the backend natively
 
-For fast iteration without rebuilding the image, run the
-dependencies in compose and the backend natively:
+For fast iteration, run the stateful deps in compose and the backend natively:
 
 ```bash
-docker compose up -d postgres zenoh-router
-.venv/bin/python -m leitstand_backend
+make dev-run       # docker compose up -d postgres zenoh-router, then the backend
 ```
 
 ### Pre-commit hooks

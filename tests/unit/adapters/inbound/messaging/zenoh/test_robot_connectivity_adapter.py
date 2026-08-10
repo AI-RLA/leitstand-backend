@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from zenoh import SampleKind
 
-from leitstand_backend.adapters.inbound.messaging.zenoh.robot_connectivity_adapter import (
+from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_connectivity_adapter import (
     ZenohRobotConnectivityAdapter,
     _extract_robot_id,
     _reply_payload_bytes,
@@ -21,7 +21,7 @@ from leitstand_backend.ports.inbound.robot_connectivity import (
 
 _RCTS_PATH = (
     "leitstand_backend.adapters.inbound.messaging.zenoh"
-    ".robot_connectivity_adapter.asyncio.run_coroutine_threadsafe"
+    ".robot.robot_connectivity_adapter.asyncio.run_coroutine_threadsafe"
 )
 
 # ---------------------------------------------------------------------------

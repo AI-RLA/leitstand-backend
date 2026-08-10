@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leitstand API",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "paths": {
     "/healthz": {
@@ -308,6 +308,793 @@
         }
       }
     },
+    "/api/v1/missions/": {
+      "get": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "List Missions",
+        "description": "List missions, newest first, optionally filtered to one robot's missions.",
+        "operationId": "list_missions_api_v1_missions__get",
+        "parameters": [
+          {
+            "name": "robot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to missions assigned to this robot id.",
+              "title": "Robot"
+            },
+            "description": "Filter to missions assigned to this robot id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MissionView"
+                  },
+                  "title": "Response List Missions Api V1 Missions  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Create Mission",
+        "operationId": "create_mission_api_v1_missions__post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MissionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}": {
+      "get": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Get Mission",
+        "operationId": "get_mission_api_v1_missions__mission_id__get",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Update Mission",
+        "operationId": "update_mission_api_v1_missions__mission_id__patch",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MissionUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Delete Mission",
+        "operationId": "delete_mission_api_v1_missions__mission_id__delete",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/state": {
+      "get": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Get Mission State",
+        "description": "Return the mission's per-stage runtime state, with errors attributed per stage.",
+        "operationId": "get_mission_state_api_v1_missions__mission_id__state_get",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionStateView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/assign": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Assign Mission",
+        "operationId": "assign_mission_api_v1_missions__mission_id__assign_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MissionAssignBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/unassign": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Unassign Mission",
+        "operationId": "unassign_mission_api_v1_missions__mission_id__unassign_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/dispatch": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Dispatch Mission",
+        "operationId": "dispatch_mission_api_v1_missions__mission_id__dispatch_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/MissionDispatchBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/cancel": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Cancel Mission",
+        "operationId": "cancel_mission_api_v1_missions__mission_id__cancel_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/pause": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Pause Mission",
+        "operationId": "pause_mission_api_v1_missions__mission_id__pause_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/resume": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Resume Mission",
+        "operationId": "resume_mission_api_v1_missions__mission_id__resume_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/{mission_id}/reset": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Reset Mission",
+        "operationId": "reset_mission_api_v1_missions__mission_id__reset_post",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sites/": {
+      "get": {
+        "tags": [
+          "sites"
+        ],
+        "summary": "List Sites",
+        "operationId": "list_sites_api_v1_sites__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SiteView"
+                  },
+                  "type": "array",
+                  "title": "Response List Sites Api V1 Sites  Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sites"
+        ],
+        "summary": "Create Site",
+        "operationId": "create_site_api_v1_sites__post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sites/{site_id}": {
+      "get": {
+        "tags": [
+          "sites"
+        ],
+        "summary": "Get Site",
+        "operationId": "get_site_api_v1_sites__site_id__get",
+        "parameters": [
+          {
+            "name": "site_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Site Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "sites"
+        ],
+        "summary": "Update Site",
+        "operationId": "update_site_api_v1_sites__site_id__patch",
+        "parameters": [
+          {
+            "name": "site_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Site Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sites"
+        ],
+        "summary": "Delete Site",
+        "operationId": "delete_site_api_v1_sites__site_id__delete",
+        "parameters": [
+          {
+            "name": "site_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Site Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/users/me": {
       "get": {
         "tags": [
@@ -357,6 +1144,43 @@
           "charging"
         ],
         "title": "Battery"
+      },
+      "ErrorOrigin": {
+        "type": "string",
+        "enum": [
+          "robot",
+          "backend"
+        ],
+        "title": "ErrorOrigin",
+        "description": "Source of a mission error: the robot's execution, or a backend-authored cause."
+      },
+      "ErrorReference": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "ErrorReference",
+        "description": "Key/value pair attaching context to a :class:`MissionError`."
+      },
+      "ErrorSeverity": {
+        "type": "string",
+        "enum": [
+          "WARNING",
+          "FATAL"
+        ],
+        "title": "ErrorSeverity",
+        "description": "Severity of an error reported by the robot."
       },
       "FieldCreate": {
         "properties": {
@@ -509,6 +1333,403 @@
           "id"
         ],
         "title": "Metadata"
+      },
+      "MissionAssignBody": {
+        "properties": {
+          "robot_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Robot Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "robot_id"
+        ],
+        "title": "MissionAssignBody"
+      },
+      "MissionCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/NavigationStage-Input"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Stages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "stages"
+        ],
+        "title": "MissionCreate"
+      },
+      "MissionDispatchBody": {
+        "properties": {
+          "robot_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Robot Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "robot_id"
+        ],
+        "title": "MissionDispatchBody"
+      },
+      "MissionError": {
+        "properties": {
+          "origin": {
+            "$ref": "#/components/schemas/ErrorOrigin"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/ErrorSeverity"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "Stable identifier for programmatic dispatch (e.g. ``boundary_anchor_mismatch``)."
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/ErrorReference"
+            },
+            "type": "array",
+            "title": "References"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "origin",
+          "severity",
+          "type",
+          "description"
+        ],
+        "title": "MissionError",
+        "description": "A structured error report attached to a stage or mission.\n\nMirrors the proto ``Error`` (severity / type / references / description); ``origin``\nis a backend-only marker distinguishing a robot fault from a backend-authored cause."
+      },
+      "MissionStateView": {
+        "properties": {
+          "mission_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mission Id"
+          },
+          "stage_states": {
+            "items": {
+              "$ref": "#/components/schemas/StageStateView"
+            },
+            "type": "array",
+            "title": "Stage States"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mission_id",
+          "stage_states"
+        ],
+        "title": "MissionStateView",
+        "description": "A mission's per-stage state as one read shape for both REST and the live WS frame."
+      },
+      "MissionStatus": {
+        "type": "string",
+        "enum": [
+          "DRAFT",
+          "ASSIGNED",
+          "DISPATCHED",
+          "RUNNING",
+          "PAUSED",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "title": "MissionStatus",
+        "description": "Lifecycle state of a Mission as tracked by the backend."
+      },
+      "MissionUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "stages": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NavigationStage-Input"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stages"
+          }
+        },
+        "type": "object",
+        "title": "MissionUpdate"
+      },
+      "MissionView": {
+        "properties": {
+          "mission_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mission Id"
+          },
+          "update_id": {
+            "type": "integer",
+            "title": "Update Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/NavigationStage-Output"
+            },
+            "type": "array",
+            "title": "Stages"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MissionStatus"
+          },
+          "robot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot Id"
+          },
+          "dispatched_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "failure_errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MissionError"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mission_id",
+          "update_id",
+          "name",
+          "description",
+          "stages",
+          "status",
+          "robot_id",
+          "dispatched_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MissionView"
+      },
+      "NavigationStage-Input": {
+        "properties": {
+          "stage_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Stage Id"
+          },
+          "on_cancel": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NavigationStage-Input"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Cancel",
+            "description": "Cleanup stages executed sequentially when this stage is cancelled. Cleanup stages are themselves non-cancellable."
+          },
+          "kind": {
+            "type": "string",
+            "const": "navigation",
+            "title": "Kind",
+            "default": "navigation"
+          },
+          "waypoints": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/WGS84Waypoint"
+                },
+                {
+                  "$ref": "#/components/schemas/SiteLocalWaypoint"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "site_local": "#/components/schemas/SiteLocalWaypoint",
+                  "wgs84": "#/components/schemas/WGS84Waypoint"
+                }
+              }
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Waypoints",
+            "description": "Ordered waypoints to traverse. All waypoints in one stage must share their ``kind`` (homogeneity); this is enforced by the backend at dispatch, not by this schema."
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage_id",
+          "waypoints"
+        ],
+        "title": "NavigationStage",
+        "description": "Drive the robot through an ordered list of waypoints."
+      },
+      "NavigationStage-Output": {
+        "properties": {
+          "stage_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Stage Id"
+          },
+          "on_cancel": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/NavigationStage-Output"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Cancel",
+            "description": "Cleanup stages executed sequentially when this stage is cancelled. Cleanup stages are themselves non-cancellable."
+          },
+          "kind": {
+            "type": "string",
+            "const": "navigation",
+            "title": "Kind",
+            "default": "navigation"
+          },
+          "waypoints": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/WGS84Waypoint"
+                },
+                {
+                  "$ref": "#/components/schemas/SiteLocalWaypoint"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "site_local": "#/components/schemas/SiteLocalWaypoint",
+                  "wgs84": "#/components/schemas/WGS84Waypoint"
+                }
+              }
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Waypoints",
+            "description": "Ordered waypoints to traverse. All waypoints in one stage must share their ``kind`` (homogeneity); this is enforced by the backend at dispatch, not by this schema."
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage_id",
+          "waypoints"
+        ],
+        "title": "NavigationStage",
+        "description": "Drive the robot through an ordered list of waypoints."
       },
       "Polygon": {
         "properties": {
@@ -689,35 +1910,16 @@
         "maxItems": 3,
         "minItems": 3
       },
-      "RobotState": {
-        "properties": {
-          "ts": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Ts"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "idle",
-              "charging",
-              "alert"
-            ],
-            "title": "Status"
-          },
-          "task": {
-            "type": "string",
-            "title": "Task",
-            "default": ""
-          }
-        },
-        "type": "object",
-        "required": [
-          "ts",
-          "status"
+      "RobotStatus": {
+        "type": "string",
+        "enum": [
+          "offline",
+          "charging",
+          "active",
+          "idle"
         ],
-        "title": "RobotState"
+        "title": "RobotStatus",
+        "description": "Displayed operational status of a robot."
       },
       "RobotView": {
         "properties": {
@@ -757,15 +1959,8 @@
               }
             ]
           },
-          "state": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RobotState"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "status": {
+            "$ref": "#/components/schemas/RobotStatus"
           }
         },
         "type": "object",
@@ -773,9 +1968,374 @@
           "id",
           "metadata",
           "online",
-          "last_seen"
+          "last_seen",
+          "status"
         ],
         "title": "RobotView"
+      },
+      "SiteCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "anchor_lat": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Anchor Lat"
+          },
+          "anchor_lon": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Anchor Lon"
+          },
+          "anchor_heading_deg": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Anchor Heading Deg"
+          },
+          "nav2_map_ref": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Nav2 Map Ref"
+          },
+          "outline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Polygon"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "anchor_lat",
+          "anchor_lon",
+          "anchor_heading_deg",
+          "nav2_map_ref"
+        ],
+        "title": "SiteCreate"
+      },
+      "SiteLocalWaypoint": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "site_local",
+            "title": "Kind",
+            "default": "site_local"
+          },
+          "site_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Site Id",
+            "description": "Identifies the Site whose local frame this waypoint uses."
+          },
+          "x": {
+            "type": "number",
+            "title": "X",
+            "description": "Meters along the site's local +x axis."
+          },
+          "y": {
+            "type": "number",
+            "title": "Y",
+            "description": "Meters along the site's local +y axis."
+          },
+          "theta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Theta",
+            "description": "Target robot heading in radians, CCW from the site's local +x axis."
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_id",
+          "x",
+          "y"
+        ],
+        "title": "SiteLocalWaypoint",
+        "description": "A waypoint expressed in a Site's local Cartesian frame."
+      },
+      "SiteUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "anchor_lat": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 90.0,
+                "minimum": -90.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor Lat"
+          },
+          "anchor_lon": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor Lon"
+          },
+          "anchor_heading_deg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 180.0,
+                "minimum": -180.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor Heading Deg"
+          },
+          "nav2_map_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nav2 Map Ref"
+          },
+          "outline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Polygon"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "title": "SiteUpdate"
+      },
+      "SiteView": {
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Site Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "anchor_lat": {
+            "type": "number",
+            "title": "Anchor Lat"
+          },
+          "anchor_lon": {
+            "type": "number",
+            "title": "Anchor Lon"
+          },
+          "anchor_heading_deg": {
+            "type": "number",
+            "title": "Anchor Heading Deg"
+          },
+          "nav2_map_ref": {
+            "type": "string",
+            "title": "Nav2 Map Ref"
+          },
+          "outline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Polygon"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "site_id",
+          "name",
+          "anchor_lat",
+          "anchor_lon",
+          "anchor_heading_deg",
+          "nav2_map_ref",
+          "outline",
+          "description",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SiteView"
+      },
+      "StageStateView": {
+        "properties": {
+          "stage_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Stage Id"
+          },
+          "stage_index": {
+            "type": "integer",
+            "title": "Stage Index"
+          },
+          "status": {
+            "$ref": "#/components/schemas/StageStatus"
+          },
+          "progress": {
+            "type": "number",
+            "title": "Progress"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/MissionError"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage_id",
+          "stage_index",
+          "status",
+          "progress",
+          "started_at",
+          "ended_at",
+          "result",
+          "errors"
+        ],
+        "title": "StageStateView",
+        "description": "One stage's runtime state plus the errors attributed to it."
+      },
+      "StageStatus": {
+        "type": "string",
+        "enum": [
+          "WAITING",
+          "INITIALIZING",
+          "RUNNING",
+          "PAUSED",
+          "FINISHED",
+          "FAILED",
+          "CANCELLED",
+          "SKIPPED"
+        ],
+        "title": "StageStatus",
+        "description": "Canonical per-stage status, covering both robot-reported and backend-resolved values.\n\nThe robot reports ``WAITING`` through ``FAILED`` on the wire. ``CANCELLED`` and\n``SKIPPED`` are backend-only: the robot cannot express them (it reports a cancelled\ngoal as ``FAILED`` and never reports a stage it did not reach), so the backend assigns\nthem when it resolves the final per-stage view at the terminal mission transition.\nInbound frames carry only the wire values; the anti-corruption mapper rejects any other."
       },
       "User": {
         "properties": {
@@ -834,6 +2394,51 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WGS84Waypoint": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "wgs84",
+            "title": "Kind",
+            "default": "wgs84"
+          },
+          "lat": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Lat",
+            "description": "Degrees latitude, WGS84."
+          },
+          "lon": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Lon",
+            "description": "Degrees longitude, WGS84."
+          },
+          "heading_deg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMaximum": 360.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heading Deg",
+            "description": "Target robot heading in degrees clockwise from true north (compass bearing), [0, 360)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "lat",
+          "lon"
+        ],
+        "title": "WGS84Waypoint",
+        "description": "A waypoint anchored in the WGS84 geographic frame."
       }
     }
   }

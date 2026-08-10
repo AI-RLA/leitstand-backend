@@ -1,4 +1,4 @@
-"""Telemetry payload models: Pose, Battery, RobotState."""
+"""Telemetry payload models: Pose, Battery."""
 
 from __future__ import annotations
 
@@ -25,14 +25,3 @@ class Battery(BaseModel):
     ts: datetime
     battery_pct: int = Field(ge=0, le=100)
     charging: bool
-
-
-RobotStatus = Literal["active", "idle", "charging", "alert"]
-
-
-class RobotState(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    ts: datetime
-    status: RobotStatus
-    task: str = ""

@@ -7,6 +7,7 @@ import threading
 from contextlib import asynccontextmanager
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from uuid import UUID
 
 import structlog
 from alembic import command as alembic_command
@@ -17,26 +18,42 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from leitstand_backend.adapters.inbound.messaging.zenoh.robot_connectivity_adapter import (
+from leitstand_backend.adapters.inbound.messaging.zenoh.mission.mission_state_adapter import (
+    ZenohMissionStateAdapter,
+)
+from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_connectivity_adapter import (
     ZenohRobotConnectivityAdapter,
 )
-from leitstand_backend.adapters.inbound.messaging.zenoh.robot_data_adapter import (
-    ZenohRobotDataAdapter,
+from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_factsheet_adapter import (
+    ZenohRobotFactsheetAdapter,
+)
+from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_telemetry_adapter import (
+    ZenohRobotTelemetryAdapter,
 )
 from leitstand_backend.adapters.inbound.web.fields.routes import router as fields_router
+from leitstand_backend.adapters.inbound.web.missions.routes import router as missions_router
 from leitstand_backend.adapters.inbound.web.robots.routes import router as robots_router
 from leitstand_backend.adapters.inbound.web.shared.health import router as health_router
+from leitstand_backend.adapters.inbound.web.sites.routes import router as sites_router
 from leitstand_backend.adapters.inbound.web.users.routes import router as users_router
 from leitstand_backend.adapters.inbound.web.ws.routes import router as ws_router
+from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_dispatcher_adapter import (
+    ZenohMissionDispatcherAdapter,
+)
+from leitstand_backend.adapters.outbound.persistence.postgres.mission_repository_adapter import (
+    PostgresMissionRepositoryAdapter,
+)
 from leitstand_backend.adapters.outbound.persistence.postgres.models import RobotRow
 from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_adapter import (
     PostgresRobotRepositoryAdapter,
 )
-from leitstand_backend.application.robot_connectivity_service import (
-    RobotConnectivityService,
-)
-from leitstand_backend.application.robot_state_service import RobotStateService
+from leitstand_backend.application.mission_state_service import MissionStateService
+from leitstand_backend.application.robot_connectivity_service import RobotConnectivityService
+from leitstand_backend.application.robot_factsheet_service import RobotFactsheetService
 from leitstand_backend.application.robot_telemetry_service import RobotTelemetryService
+from leitstand_backend.domain import event_topics
+from leitstand_backend.domain.model.mission.mission import Mission
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.infrastructure.db import (
     create_engine,
     create_session_factory,
@@ -44,16 +61,27 @@ from leitstand_backend.infrastructure.db import (
     transactional_scope,
 )
 from leitstand_backend.infrastructure.event_bus import EventBus
+from leitstand_backend.infrastructure.factsheet_view import EventBusBackedRobotFactsheetView
 from leitstand_backend.infrastructure.messaging.zenoh import zenoh_session
 from leitstand_backend.infrastructure.middleware import RequestIdMiddleware
+from leitstand_backend.infrastructure.robot_status_projector import (
+    RobotStatusProjector,
+    SessionScopedRobotStatusReadModel,
+)
 from leitstand_backend.infrastructure.settings import Settings
 from leitstand_backend.infrastructure.state_view import EventBusBackedRobotStateView
+from leitstand_backend.infrastructure.transactional_events import TransactionBoundEventPublisher
 from leitstand_backend.logging_setup import configure_logging
+from leitstand_backend.ports.inbound.mission_state import (
+    HandleRobotOfflineCommand,
+    MissionStateUseCase,
+)
 from leitstand_backend.ports.inbound.robot_connectivity import (
     RecordOfflineCommand,
     RecordOnlineCommand,
     RobotConnectivityUseCase,
 )
+from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 
 logger = structlog.get_logger(__name__)
 
@@ -97,11 +125,62 @@ async def _seed_event_bus_from_db(
         for kind, payload in [
             ("pose", row.last_pose),
             ("battery", row.last_battery),
-            ("state", row.last_state),
         ]:
             if payload is not None:
-                bus.publish(f"events.robot/{row.id}/{kind}", payload, latch=True)
+                bus.publish(event_topics.robot_topic(row.id, kind), payload, latch=True)
     logger.info("event_bus_seeded_from_db", robots=len(rows))
+
+
+class _NullMissionDispatcher(MissionDispatcher):
+    """No-op dispatcher used when Zenoh is disabled (dev/test)."""
+
+    async def dispatch(self, mission: Mission, robot_id: str) -> None:
+        pass
+
+    async def cancel(
+        self,
+        mission_id: UUID,
+        robot_id: str,
+        mode: CancelMode = CancelMode.GRACEFUL,
+    ) -> None:
+        pass
+
+    async def pause(self, mission_id: UUID, robot_id: str) -> None:
+        pass
+
+    async def resume(self, mission_id: UUID, robot_id: str) -> None:
+        pass
+
+
+class _SessionScopedMissionStateUseCase(MissionStateUseCase):
+    """Wraps MissionStateService so each call opens its own DB session.
+
+    Called from the Zenoh mission-state subscriber thread (via
+    run_coroutine_threadsafe) and from the connectivity adapter on
+    robot-offline events; concurrent callers must not share session state.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        bus: EventBus,
+    ) -> None:
+        self._session_factory = session_factory
+        self._bus = bus
+
+    async def record(self, command) -> None:
+        async with transactional_scope(self._session_factory) as s:
+            repo = PostgresMissionRepositoryAdapter(s)
+            await MissionStateService(
+                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+            ).record(command)
+
+    async def handle_robot_offline(self, command) -> None:
+        async with transactional_scope(self._session_factory) as s:
+            repo = PostgresMissionRepositoryAdapter(s)
+            await MissionStateService(
+                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+            ).handle_robot_offline(command)
 
 
 class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
@@ -121,46 +200,59 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
         bus: EventBus,
         z_session,
         telemetry_use_case: RobotTelemetryService,
-        state_use_case: RobotStateService,
         loop: asyncio.AbstractEventLoop,
+        factsheet_adapter: ZenohRobotFactsheetAdapter | None = None,
+        mission_state_uc: MissionStateUseCase | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._bus = bus
         self._z_session = z_session
         self._telemetry_uc = telemetry_use_case
-        self._state_uc = state_use_case
         self._loop = loop
-        self._data_adapters: dict[str, ZenohRobotDataAdapter] = {}
+        self._factsheet_adapter = factsheet_adapter
+        self._mission_state_uc = mission_state_uc
+        self._data_adapters: dict[str, ZenohRobotTelemetryAdapter] = {}
         self._adapters_lock = threading.Lock()
 
     async def record_online(self, command: RecordOnlineCommand):
         async with transactional_scope(self._session_factory) as s:
             repo = PostgresRobotRepositoryAdapter(s)
-            service = RobotConnectivityService(repo=repo, events=self._bus)
+            service = RobotConnectivityService(
+                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+            )
             robot = await service.record_online(command)
         with self._adapters_lock:
             if command.robot_id not in self._data_adapters:
-                adapter = ZenohRobotDataAdapter(
+                adapter = ZenohRobotTelemetryAdapter(
                     session=self._z_session,
                     robot_id=command.robot_id,
                     telemetry_use_case=self._telemetry_uc,
-                    state_use_case=self._state_uc,
                     loop=self._loop,
                 )
                 adapter.start()
                 self._data_adapters[command.robot_id] = adapter
+        if self._factsheet_adapter is not None:
+            asyncio.get_running_loop().run_in_executor(
+                None, self._factsheet_adapter.fetch_and_record, command.robot_id
+            )
         return robot
 
     async def record_offline(self, command: RecordOfflineCommand):
         async with transactional_scope(self._session_factory) as s:
             repo = PostgresRobotRepositoryAdapter(s)
-            service = RobotConnectivityService(repo=repo, events=self._bus)
+            service = RobotConnectivityService(
+                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+            )
             robot = await service.record_offline(command)
             if robot is not None:
-                for kind in ("pose", "battery", "state"):
-                    payload = self._bus.latched(f"events.robot/{command.robot_id}/{kind}")
+                for kind in ("pose", "battery"):
+                    payload = self._bus.latched(event_topics.robot_topic(command.robot_id, kind))
                     if payload is not None:
                         await repo.save_telemetry(command.robot_id, kind, payload)
+        if self._mission_state_uc is not None:
+            await self._mission_state_uc.handle_robot_offline(
+                HandleRobotOfflineCommand(robot_id=command.robot_id)
+            )
         with self._adapters_lock:
             adapter = self._data_adapters.pop(command.robot_id, None)
         if adapter is not None:
@@ -191,6 +283,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_factory = create_session_factory(engine)
         bus = EventBus()
         state_view = EventBusBackedRobotStateView(bus)
+        factsheet_view = EventBusBackedRobotFactsheetView(bus)
 
         if settings.auto_migrate or not settings.zenoh_disabled:
             try:
@@ -217,8 +310,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         loop = asyncio.get_running_loop()
 
+        mission_dispatcher: MissionDispatcher = _NullMissionDispatcher()
         connectivity_uc: _SessionScopedConnectivityUseCase | None = None
         connectivity_adapter: ZenohRobotConnectivityAdapter | None = None
+        mission_state_adapter: ZenohMissionStateAdapter | None = None
+        robot_status_projector: RobotStatusProjector | None = None
         z_ctx = None
         z_session = None
 
@@ -239,15 +335,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise SystemExit(1) from None
 
             telemetry_uc = RobotTelemetryService(events=bus)
-            state_uc = RobotStateService(events=bus)
+            factsheet_uc = RobotFactsheetService(events=bus)
+            mission_state_uc = _SessionScopedMissionStateUseCase(session_factory, bus)
+            mission_dispatcher = ZenohMissionDispatcherAdapter(z_session)
+            factsheet_adapter = ZenohRobotFactsheetAdapter(z_session, factsheet_uc, loop)
+            mission_state_adapter = ZenohMissionStateAdapter(z_session, mission_state_uc, loop)
+            mission_state_adapter.start()
             connectivity_uc = _SessionScopedConnectivityUseCase(
                 session_factory=session_factory,
                 bus=bus,
                 z_session=z_session,
                 telemetry_use_case=telemetry_uc,
-                state_use_case=state_uc,
+                loop=loop,
+                factsheet_adapter=factsheet_adapter,
+                mission_state_uc=mission_state_uc,
+            )
+            # Start the projector and latch initial statuses before connectivity, so it
+            # does not miss the liveliness online burst replayed on subscribe.
+            robot_status_projector = RobotStatusProjector(
+                subscriber=bus,
+                publisher=bus,
+                read_model=SessionScopedRobotStatusReadModel(session_factory, state_view),
                 loop=loop,
             )
+            robot_status_projector.start()
+            await robot_status_projector.recompute_all()
             connectivity_adapter = ZenohRobotConnectivityAdapter(
                 session=z_session,
                 use_case=connectivity_uc,
@@ -261,13 +373,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.zenoh_session = z_session
         app.state.event_bus = bus
         app.state.state_view = state_view
+        app.state.factsheet_view = factsheet_view
+        app.state.mission_dispatcher = mission_dispatcher
         app.state.connectivity_uc = connectivity_uc
         app.state.connectivity_adapter = connectivity_adapter
+        app.state.robot_status_projector = robot_status_projector
         logger.info("leitstand_started", endpoint=settings.zenoh_endpoint)
 
         try:
             yield
         finally:
+            if robot_status_projector is not None:
+                try:
+                    await robot_status_projector.aclose()
+                except Exception:  # noqa: BLE001
+                    logger.warning("robot_status_projector_close_error")
+            if mission_state_adapter is not None:
+                try:
+                    mission_state_adapter.close()
+                except Exception:  # noqa: BLE001
+                    logger.warning("mission_state_adapter_close_error")
             if connectivity_adapter is not None:
                 try:
                     connectivity_adapter.close()
@@ -295,6 +420,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(fields_router)
     app.include_router(robots_router)
+    app.include_router(missions_router)
+    app.include_router(sites_router)
     app.include_router(users_router)
     app.include_router(ws_router)
     return app

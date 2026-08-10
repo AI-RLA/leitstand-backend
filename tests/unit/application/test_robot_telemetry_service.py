@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from leitstand_backend.application.robot_telemetry_service import RobotTelemetryService
-from leitstand_backend.domain.model.telemetry import Battery, Pose
+from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
 from leitstand_backend.ports.inbound.robot_telemetry import (
     RecordBatteryCommand,
     RecordPoseCommand,
@@ -26,9 +26,9 @@ async def test_record_pose_publishes_latched_topic_and_fanout() -> None:
     await svc.record_pose(RecordPoseCommand(robot_id="r1", pose=pose))
 
     latched_topics = [t for t, _, latch in pub.published if latch]
-    assert "events.robot/r1/pose" in latched_topics
+    assert "events/robot/r1/pose" in latched_topics
     fanout_topics = [t for t, _, latch in pub.published if not latch]
-    assert "events.robot/r1" in fanout_topics
+    assert "events/robot/r1" in fanout_topics
 
 
 @pytest.mark.asyncio
@@ -40,6 +40,6 @@ async def test_record_battery_publishes_latched_topic() -> None:
     await svc.record_battery(RecordBatteryCommand(robot_id="r1", battery=battery))
 
     latched_topics = [t for t, _, latch in pub.published if latch]
-    assert "events.robot/r1/battery" in latched_topics
+    assert "events/robot/r1/battery" in latched_topics
     latched_payloads = {t: p for t, p, latch in pub.published if latch}
-    assert latched_payloads["events.robot/r1/battery"]["battery_pct"] == 80
+    assert latched_payloads["events/robot/r1/battery"]["battery_pct"] == 80

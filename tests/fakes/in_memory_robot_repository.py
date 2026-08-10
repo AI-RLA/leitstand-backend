@@ -6,7 +6,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 
-from leitstand_backend.domain.model.robot import Metadata, Robot
+from leitstand_backend.domain.model.robot.robot import Metadata, Robot
 from leitstand_backend.ports.outbound.robot_repository import RobotRepository
 
 logger = logging.getLogger(__name__)

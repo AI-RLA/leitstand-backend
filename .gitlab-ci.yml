@@ -6,11 +6,17 @@ default:
     paths:
       - .cache/pip
   before_script:
+    # Install the robot contract from its GitLab repo at ROBOT_CONTRACT_REF
+    # before the backend, so the leitstand-robot-contract dependency resolves.
+    - pip install "git+https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/agro-technicum/ag-intelligente-agrarsysteme/workinggroup-projects/leitstand/leitstand-robot-contract.git@${ROBOT_CONTRACT_REF}"
     - pip install -e ".[dev]"
 
 variables:
   PIP_CACHE_DIR: $CI_PROJECT_DIR/.cache/pip
   PYTHON: python
+  # Git ref (tag or commit) of leitstand-robot-contract the backend builds
+  # against; bump when the wire changes.
+  ROBOT_CONTRACT_REF: v0.1.0
 
 stages: [check]
 

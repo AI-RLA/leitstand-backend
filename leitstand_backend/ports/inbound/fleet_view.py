@@ -4,23 +4,22 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
 
-from leitstand_backend.domain.model.robot import Robot
-from leitstand_backend.domain.model.telemetry import Battery, Pose, RobotState
+from leitstand_backend.domain.model.robot.robot import Robot
+from leitstand_backend.domain.model.robot.robot_status import RobotStatus
+from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
 
 
 class RobotOverview(BaseModel):
     """Output contract for FleetViewUseCase queries.
 
-    Composes a Robot with the latest cached telemetry triple. Transient,
-    in-process; never persisted. Per ADR 0018's port-file pattern (input
-    Commands colocated with the use case ABC), output contracts live
-    here too.
+    Composes a Robot with its latest cached telemetry and its derived operational
+    ``status``. Transient, in-process; never persisted.
     """
 
     robot: Robot
     pose: Pose | None = None
     battery: Battery | None = None
-    state: RobotState | None = None
+    status: RobotStatus
 
 
 class FleetViewUseCase(ABC):

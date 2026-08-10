@@ -24,7 +24,7 @@ import structlog
 import zenoh
 from zenoh import SampleKind
 
-from leitstand_backend.domain.model.robot import Metadata
+from leitstand_backend.domain.model.robot.robot import Metadata
 from leitstand_backend.ports.inbound.robot_connectivity import (
     RecordOfflineCommand,
     RecordOnlineCommand,

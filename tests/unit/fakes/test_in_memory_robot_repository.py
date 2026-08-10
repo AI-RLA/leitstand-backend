@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from leitstand_backend.domain.model.robot import Metadata
+from leitstand_backend.domain.model.robot.robot import Metadata
 from tests.fakes.in_memory_robot_repository import InMemoryRobotRepository
 
 

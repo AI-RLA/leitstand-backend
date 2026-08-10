@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
@@ -16,6 +17,29 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from leitstand_backend.infrastructure.settings import Settings
+
+logger = structlog.get_logger(__name__)
+
+_AFTER_COMMIT_KEY = "after_commit_callbacks"
+
+
+def register_after_commit(session: AsyncSession, callback: Callable[[], None]) -> None:
+    """Queue a zero-arg callback to run after this session's transaction commits (FIFO).
+
+    Lets a producer defer a side effect (e.g. publishing a bus event) until its write is
+    durable. The callback runs in ``run_after_commit_callbacks``, invoked by the commit
+    boundary; it is discarded if the transaction rolls back.
+    """
+    session.info.setdefault(_AFTER_COMMIT_KEY, []).append(callback)
+
+
+def run_after_commit_callbacks(session: AsyncSession) -> None:
+    """Run and clear the session's queued after-commit callbacks, FIFO. Never raises."""
+    for callback in session.info.pop(_AFTER_COMMIT_KEY, ()):
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 - one failed callback must not drop the rest
+            logger.exception("after_commit_callback_failed")
 
 
 class Base(DeclarativeBase):
@@ -67,3 +91,5 @@ async def transactional_scope(
         except Exception:
             await session.rollback()
             raise
+        else:
+            run_after_commit_callbacks(session)

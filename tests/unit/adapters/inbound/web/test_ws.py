@@ -12,16 +12,16 @@ def test_ws_subscribe_receives_latched_snapshot() -> None:
     app = create_app(Settings(zenoh_disabled=True, auto_migrate=False))
     with TestClient(app) as client:
         app.state.event_bus.publish(
-            "events.robot/r1/pose",
+            "events/robot/r1/pose",
             {"lat": 1.0, "lon": 2.0},
             latch=True,
         )
         with client.websocket_connect("/ws/v1") as ws:
-            ws.send_json({"type": "subscribe", "topic": "events.robot/r1/pose"})
+            ws.send_json({"type": "subscribe", "topic": "events/robot/r1/pose"})
             for _ in range(3):
                 msg = ws.receive_json()
                 if msg.get("type") == "event":
-                    assert msg["topic"] == "events.robot/r1/pose"
+                    assert msg["topic"] == "events/robot/r1/pose"
                     assert msg["payload"] == {"lat": 1.0, "lon": 2.0}
                     return
             raise AssertionError("did not receive snapshot event")

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim-bookworm
 
 WORKDIR /app
@@ -5,6 +6,10 @@ WORKDIR /app
 # Source must be present before `pip install .` so setuptools'
 # package finder can resolve the leitstand_backend package.
 COPY pyproject.toml README.md ./
+
+COPY --from=contract-src . /tmp/contract-src/
+RUN pip install --no-cache-dir /tmp/contract-src && rm -rf /tmp/contract-src
+
 COPY leitstand_backend ./leitstand_backend
 COPY migrations ./migrations
 
