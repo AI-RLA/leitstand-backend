@@ -65,6 +65,7 @@ _READ_PATHS = (
 # or the catalog and is gated behind human approval on the agent side (see requires_approval).
 _WRITE_ROUTES = (
     (r"^/api/v1/missions/$", ["POST"]),
+    (r"^/api/v1/missions/coverage$", ["POST"]),
     (r"^/api/v1/missions/\{mission_id\}$", ["PATCH", "DELETE"]),
     (r"^/api/v1/missions/\{mission_id\}/assign$", ["POST"]),
     (r"^/api/v1/missions/\{mission_id\}/unassign$", ["POST"]),
@@ -114,6 +115,32 @@ _WHEN_TO_CALL = {
         "Call this for any question about which sites exist. The list may legitimately be empty."
     ),
     "get_site": "Call this for one site's anchor and outline, given its id.",
+    "plan_coverage_mission": (
+        "Call this whenever the operator wants a whole field covered, surveyed, mown or treated, "
+        "rather than the robot driven to points they named. It derives the path from the stored "
+        "field boundary, so you pass a field id and numbers and never coordinates. The mission "
+        "name defaults to the field's, so the one value to ask the operator for is the "
+        "implement's working width. Never substitute the robot's own width for it, and never "
+        "guess it from anything you read elsewhere. "
+        "The robot id is required and has no default. Take it from list_robots and never from a "
+        "name the operator speaks: robots carry no name, so what they call a machine is not its "
+        "id, and nothing here resolves one to the other. The robot you name decides the plan's "
+        "shape, because its declared turning radius is what every turn is laid out to, and is "
+        "also the headland unless the operator states one. Say which robot you used. "
+        "To change an existing plan, pass its id as replaces: a plan is re-derived rather than "
+        "edited, and without it you leave the operator holding two missions for one field. "
+        "Doing so returns a new mission with a new id and removes the old one, so report it "
+        "as a replacement naming both ids, never as the same mission having been updated. "
+        "When the result reports a max_excursion_m above zero, say so and give the number: the "
+        "machine leaves the field by that much, and only the operator knows what the edge is. "
+        "covered_area_m2 is clipped to the field boundary, so it never exceeds field_area_m2. "
+        "Report both as the result gives them."
+    ),
+    "create_mission": (
+        "Call this only for a mission whose waypoints the operator stated. If they want a field "
+        "covered, call plan_coverage_mission instead: coordinates cannot be derived from a "
+        "boundary here, and guessing them is not a substitute."
+    ),
 }
 
 

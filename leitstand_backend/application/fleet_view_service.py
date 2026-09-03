@@ -1,10 +1,10 @@
 """FleetViewService: compose Robot + latest telemetry + derived operational status."""
 
-from leitstand_backend.domain.model.mission.mission_lifecycle import is_executing
 from leitstand_backend.domain.model.robot.robot import Robot
 from leitstand_backend.domain.model.robot.robot_status import derive_robot_status
 from leitstand_backend.ports.inbound.fleet_view import FleetViewUseCase, RobotOverview
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
+from leitstand_backend.ports.outbound.robot_factsheet_view import RobotFactsheetView
 from leitstand_backend.ports.outbound.robot_repository import RobotRepository
 from leitstand_backend.ports.outbound.robot_state_view import RobotStateView
 
@@ -15,10 +15,12 @@ class FleetViewService(FleetViewUseCase):
         repo: RobotRepository,
         state_view: RobotStateView,
         missions: MissionRepository,
+        factsheets: RobotFactsheetView,
     ):
         self._repo = repo
         self._state_view = state_view
         self._missions = missions
+        self._factsheets = factsheets
 
     async def get_robot(self, robot_id: str) -> RobotOverview | None:
         robot = await self._repo.get(robot_id)
@@ -32,9 +34,7 @@ class FleetViewService(FleetViewUseCase):
         return [self._build_overview(r, executing) for r in robots]
 
     async def _executing_robot_ids(self) -> set[str]:
-        """Return the ids of robots that currently have an executing mission."""
-        records = await self._missions.list_records()
-        return {r.robot_id for r in records if r.robot_id and is_executing(r.status)}
+        return await self._missions.executing_robot_ids()
 
     def _build_overview(self, robot: Robot, executing_robot_ids: set[str]) -> RobotOverview:
         battery = self._state_view.latest_battery(robot.id)
@@ -48,4 +48,5 @@ class FleetViewService(FleetViewUseCase):
             pose=self._state_view.latest_pose(robot.id),
             battery=battery,
             status=status,
+            factsheet=self._factsheets.latest(robot.id),
         )

@@ -6,7 +6,6 @@ operational label: which mission a robot runs is the mission resource's concern,
 robot status's.
 """
 
-from leitstand_backend.domain.model.mission.mission_lifecycle import is_executing
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus, derive_robot_status
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 from leitstand_backend.ports.outbound.robot_repository import RobotRepository
@@ -35,8 +34,7 @@ class RobotStatusService:
         robot = await self._robots.get(robot_id)
         if robot is None:
             return None
-        records = await self._missions.list_records(robot_id=robot_id)
-        has_active = any(is_executing(r.status) for r in records)
+        has_active = robot_id in await self._missions.executing_robot_ids()
         battery = self._state_view.latest_battery(robot_id)
         return derive_robot_status(
             online=robot.online,

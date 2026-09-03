@@ -154,7 +154,9 @@ def test_protovalidate_rejects_out_of_range_heading() -> None:
 _NEGATIVE_CORPUS = [
     '{"mission_id":"m","stagez":[]}',  # renamed structural field
     '{"mission_id":"m","stages":[{"stage_id":"s","waypoints":[]}]}',  # field on wrong level
-    '{"mission_id":"m","stages":[{"stage_id":"s","kind":"STAGE_KIND_COVERAGE"}]}',  # unknown enum name
+    # Unknown enum name. The value must be one the contract does not define, so it changes when a
+    # kind is added; COVERAGE lived here until it became real.
+    '{"mission_id":"m","stages":[{"stage_id":"s","kind":"STAGE_KIND_SPRAYING"}]}',
 ]
 
 

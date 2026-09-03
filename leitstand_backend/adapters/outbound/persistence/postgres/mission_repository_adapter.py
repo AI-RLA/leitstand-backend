@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
+from pydantic import TypeAdapter
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from leitstand_backend.adapters.outbound.persistence.postgres.models import (
     MissionStageStateRow,
 )
 from leitstand_backend.domain.errors import MissionNotFoundError
+from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
 from leitstand_backend.domain.model.mission.mission import (
     Mission,
     MissionStatus,
@@ -32,6 +34,10 @@ _TERMINAL_STATUSES = (
     MissionStatus.CANCELLED.value,
 )
 _EXECUTING_STATUSES = tuple(s.value for s in EXECUTING_STATES)
+
+# Stage is a discriminated union rather than a class, so it is validated through an
+# adapter. Built once: constructing one per row would rebuild the schema on every read.
+_STAGE = TypeAdapter(Stage)
 
 
 class PostgresMissionRepositoryAdapter(MissionRepository):
@@ -96,6 +102,16 @@ class PostgresMissionRepositoryAdapter(MissionRepository):
         )
         result = await self._session.execute(stmt)
         return [_to_domain(row) for row in result.scalars()]
+
+    async def executing_robot_ids(self) -> set[str]:
+        rows = await self._session.execute(
+            select(MissionRow.robot_id)
+            .where(MissionRow.update_id == 0)
+            .where(MissionRow.status.in_(_EXECUTING_STATUSES))
+            .where(MissionRow.robot_id.is_not(None))
+            .distinct()
+        )
+        return {r for (r,) in rows.all()}
 
     async def list_executing_by_robot(self, robot_id: str) -> list[Mission]:
         stmt = (
@@ -223,6 +239,17 @@ class PostgresMissionRepositoryAdapter(MissionRepository):
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def save_coverage_provenance(
+        self,
+        mission_id: UUID,
+        provenance: CoverageProvenance,
+    ) -> None:
+        await self._session.execute(
+            update(MissionRow)
+            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
+            .values(coverage=provenance.model_dump(mode="json"))
+        )
+
     async def upsert_stage_states(
         self,
         mission_id: UUID,
@@ -339,7 +366,7 @@ def _to_domain(row: MissionRow) -> Mission:
         update_id=row.update_id,
         name=row.name,
         description=row.description,
-        stages=[Stage.model_validate(s) for s in row.stages],
+        stages=[_STAGE.validate_python(s) for s in row.stages],
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -356,4 +383,5 @@ def _to_record(row: MissionRow) -> MissionRecord:
             if row.failure_errors
             else None
         ),
+        coverage=(CoverageProvenance.model_validate(row.coverage) if row.coverage else None),
     )

@@ -71,6 +71,18 @@ async def test_writes_are_gated_and_reads_are_not() -> None:
     assert not any(requires_approval(name) for name in exposed - mutating)
 
 
+async def test_coverage_planning_is_reachable_and_gated() -> None:
+    """The one route that lets the assistant author geometry without inventing any.
+
+    Named explicitly because the generic guards above would stay green if it vanished: they check
+    that whatever is exposed is gated, not that this is exposed at all.
+    """
+    exposed = {t.name for t in await _tools()}
+
+    assert "plan_coverage_mission" in exposed
+    assert requires_approval("plan_coverage_mission")
+
+
 async def test_tool_names_are_operation_ids() -> None:
     """The method-keyed guard matches tools to operations by name, so pin that they correspond.
 

@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     llm_read_timeout_s: int = Field(default=60)
     llm_reasoning: Literal["off", "on"] = Field(default="off")
 
+    coverage_planner_url: str | None = Field(default=None)
+    coverage_planner_connect_timeout_s: int = Field(default=3)
+    coverage_planner_read_timeout_s: int = Field(default=60)
+    coverage_turn_sample_m: float = Field(default=0.25, gt=0)
+    # How fast curvature may change per metre, in 1/m2. Fields2Cover defaults to 2.0 for a
+    # slow-steering machine; 200 lets it change freely, which suits a controller that smooths.
+    coverage_linear_curv_change: float = Field(default=200.0, gt=0)
+
     # Chat surface. Gates exposure only, never safety: an unreachable model stays harmless whatever
     # this says.
     chat_enabled: bool = Field(default=True)

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -27,6 +27,7 @@ class StageKind(str, Enum):
     """Operation kind a Stage represents."""
 
     NAVIGATION = "navigation"
+    COVERAGE = "coverage"
 
 
 class MissionStageBase(BaseModel):
@@ -56,7 +57,54 @@ class NavigationStage(MissionStageBase):
     )
 
 
-Stage = NavigationStage
+class Segment(BaseModel):
+    """One swath across a field, or the turn joining two of them.
+
+    The distinction is the reason coverage is a stage kind of its own. The ground under a swath is
+    what gets worked, so a robot that took any convenient path between the same two endpoints would
+    leave the strip beside it unworked; the ground under a turn is worked by nothing.
+    """
+
+    kind: Literal["swath", "turn"]
+    waypoints: list[Waypoint] = Field(
+        min_length=2,
+        description=(
+            "The line to drive, in order. Two waypoints describe a straight run; more describe a "
+            "curve, which cannot be recovered from its endpoints."
+        ),
+    )
+
+
+class CoverageStage(MissionStageBase):
+    """Cover a field by driving its swaths in order, each reached by the turn before it."""
+
+    kind: Literal["coverage"] = "coverage"
+    segments: list[Segment] = Field(
+        min_length=1,
+        description=(
+            "The whole stage as one ordered route. Concatenating the segments gives the drivable "
+            "line, turns included; the kinds say which of it is a worked swath. Consecutive "
+            "segments share an endpoint, which a receiver joining them skips."
+        ),
+    )
+
+
+Stage = Annotated[NavigationStage | CoverageStage, Field(discriminator="kind")]
+
+
+def stage_waypoints(stage: Any) -> list[Waypoint]:
+    """Every waypoint a stage will drive, in order, whatever shape it carries them in.
+
+    Lets checks that care only about the points (which frames they use, which sites they name)
+    stay indifferent to how a stage groups them. Reads the shape rather than the type, so the
+    request-side stage models satisfy it too without the domain having to know they exist.
+    """
+    segments = getattr(stage, "segments", None)
+    if segments is None:
+        return stage.waypoints
+    # Turns are included: they are driven too, so leaving them out would let waypoints reach the
+    # robot that no check has seen.
+    return [waypoint for segment in segments for waypoint in segment.waypoints]
 
 
 # Resolves the forward reference to ``Stage`` in MissionStageBase.on_cancel,
@@ -64,6 +112,7 @@ Stage = NavigationStage
 # an explicit rebuild call once the referenced symbol exists.
 MissionStageBase.model_rebuild()
 NavigationStage.model_rebuild()
+CoverageStage.model_rebuild()
 
 
 class Mission(BaseModel):
@@ -93,7 +142,7 @@ def referenced_site_ids(stages: list[Stage]) -> set[UUID]:
     """
     ids: set[UUID] = set()
     for stage in stages:
-        for waypoint in stage.waypoints:
+        for waypoint in stage_waypoints(stage):
             if isinstance(waypoint, SiteLocalWaypoint):
                 ids.add(waypoint.site_id)
         if stage.on_cancel:

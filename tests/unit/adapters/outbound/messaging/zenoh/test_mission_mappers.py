@@ -20,7 +20,12 @@ from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_mappers
     mission_projection_from_proto,
     mission_to_proto,
 )
-from leitstand_backend.domain.model.mission.mission import Mission, NavigationStage
+from leitstand_backend.domain.model.mission.mission import (
+    CoverageStage,
+    Mission,
+    NavigationStage,
+    Segment,
+)
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
 
@@ -144,9 +149,77 @@ def test_stage_kind_descriptor_is_exhaustively_handled() -> None:
     assert {v.number for v in mission_pb2.StageKind.DESCRIPTOR.values} == {
         mission_pb2.STAGE_KIND_UNSPECIFIED,
         mission_pb2.STAGE_KIND_NAVIGATION,
+        mission_pb2.STAGE_KIND_COVERAGE,
     }
 
 
 def test_waypoint_oneof_arms_are_exhaustively_handled() -> None:
     arms = {f.name for f in mission_pb2.Waypoint.DESCRIPTOR.oneofs_by_name["kind"].fields}
     assert arms == {"wgs84", "site_local"}
+
+
+def test_a_coverage_stage_survives_the_round_trip() -> None:
+    """Which segments are swaths is the payload's meaning, so losing it would change the work.
+
+    A route stripped of its kinds visits the same points and covers different ground: nothing
+    would say where the machine must hold a line and where it is only repositioning.
+    """
+    stage = CoverageStage(
+        stage_id=uuid4(),
+        segments=[
+            Segment(
+                kind="swath",
+                waypoints=[
+                    WGS84Waypoint(lat=52.0, lon=8.0, heading_deg=0.0),
+                    WGS84Waypoint(lat=52.001, lon=8.0),
+                ],
+            ),
+            Segment(
+                kind="turn",
+                waypoints=[
+                    WGS84Waypoint(lat=52.001, lon=8.0),
+                    WGS84Waypoint(lat=52.001, lon=8.0001, heading_deg=90.0),
+                ],
+            ),
+            Segment(
+                kind="swath",
+                waypoints=[
+                    WGS84Waypoint(lat=52.001, lon=8.0001),
+                    WGS84Waypoint(lat=52.0, lon=8.0001),
+                ],
+            ),
+        ],
+    )
+    mission = Mission(
+        mission_id=uuid4(),
+        name="cover",
+        stages=[stage],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    _, stages = mission_projection_from_proto(mission_to_proto(mission))
+
+    assert stages == [stage]
+
+
+def test_a_coverage_payload_tagged_as_navigation_is_rejected() -> None:
+    """Kind and payload must agree, or a receiver would drive the wrong thing entirely."""
+    proto = mission_pb2.Stage(
+        stage_id=str(uuid4()),
+        kind=mission_pb2.STAGE_KIND_NAVIGATION,
+        coverage=mission_pb2.CoverageStage(
+            segments=[
+                mission_pb2.Segment(
+                    kind=mission_pb2.SEGMENT_KIND_SWATH,
+                    geometry=[
+                        mission_pb2.Waypoint(wgs84=mission_pb2.WGS84Waypoint(lat=52.0, lon=8.0)),
+                        mission_pb2.Waypoint(wgs84=mission_pb2.WGS84Waypoint(lat=52.1, lon=8.0)),
+                    ],
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not match payload arm"):
+        mission_projection_from_proto(mission_pb2.Mission(mission_id=str(uuid4()), stages=[proto]))

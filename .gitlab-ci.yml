@@ -16,7 +16,7 @@ variables:
   PYTHON: python
   # Git ref (tag or commit) of leitstand-robot-contract the backend builds
   # against; bump when the wire changes.
-  ROBOT_CONTRACT_REF: v0.1.0
+  ROBOT_CONTRACT_REF: v0.2.0
 
 stages: [check]
 

@@ -393,7 +393,7 @@
           "missions"
         ],
         "summary": "Create Mission",
-        "description": "Create a mission from a name and an ordered list of navigation stages.\n\nEvery waypoint must be a coordinate the operator stated. Do not compute one: not from a field\nor site boundary, not from a robot's current position, and not by converting a distance in\nmetres into degrees. If you were given an area, a row spacing or a bearing rather than\ncoordinates, do not call this; say you cannot work them out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is created as a draft and is not\ndispatched.",
+        "description": "Create a mission from a name and an ordered list of navigation stages.\n\nEvery waypoint must be a coordinate the operator stated. Do not compute one: not from a field\nor site boundary, not from a robot's current position, and not by converting a distance in\nmetres into degrees. If you were given an area, a row spacing or a bearing rather than\ncoordinates, do not call this: use plan_coverage_mission for a field that should be covered, and\notherwise say you cannot work the coordinates out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is created as a draft and is not\ndispatched.",
         "operationId": "create_mission",
         "requestBody": {
           "required": true,
@@ -477,7 +477,7 @@
           "missions"
         ],
         "summary": "Update Mission",
-        "description": "Change a draft mission's name, description, or stages.\n\nOnly a mission still in DRAFT can be updated. Identify it by mission_id from list_missions.\nSupplying stages replaces the existing ones.",
+        "description": "Change a draft mission's name, description, or stages.\n\nOnly a mission still in DRAFT can be updated. Identify it by mission_id from list_missions.\nSupplying stages replaces the existing ones, which a planned mission refuses: re-plan it.",
         "operationId": "update_mission",
         "parameters": [
           {
@@ -587,6 +587,48 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MissionStateView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/missions/coverage": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Plan Coverage Mission",
+        "description": "Create a mission that covers a whole field, planned from the field's own boundary.\n\nUse this whenever the operator asks to cover, survey, mow or treat a field rather than to\ndrive to stated points. Give the field_id, the robot the plan is for, and the working width\nin metres; supply no coordinates, because the path is computed from the stored boundary, and\nno turning radius, because the robot declares its own.\n\nThe mission is created as a draft and is not dispatched. Its coverage metrics come back with\nit, so the operator can judge the plan before dispatching it.",
+        "operationId": "plan_coverage_mission",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MissionCoverageCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
                 }
               }
             }
@@ -1222,6 +1264,358 @@
         ],
         "title": "Battery"
       },
+      "CoverageCapability": {
+        "properties": {
+          "supported_waypoint_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/WaypointKind"
+            },
+            "type": "array",
+            "title": "Supported Waypoint Kinds"
+          }
+        },
+        "type": "object",
+        "title": "CoverageCapability",
+        "description": "Capabilities specific to executing COVERAGE stages.\n\nA claim about steering rather than geometry: that the machine holds the swath line between\nits endpoints instead of taking any convenient path between them."
+      },
+      "CoverageMetrics": {
+        "properties": {
+          "swath_count": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Swath Count"
+          },
+          "track_length_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Track Length M",
+            "description": "Total swath length, the ground actually worked. Excludes the turns, so it is what the covered area is checked against rather than how far the machine drives."
+          },
+          "path_length_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path Length M",
+            "description": "How far the machine drives in total, turns included."
+          },
+          "covered_area_m2": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Covered Area M2"
+          },
+          "mainland_area_m2": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mainland Area M2",
+            "description": "Ground the swaths were allowed to work, which is the field less its headland. Absent on a plan plotted before it was reported."
+          },
+          "max_excursion_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Excursion M",
+            "description": "How far outside the boundary the driven path reaches, in metres. A turn needs a headland at least as deep as the turning radius to be contained, and fields are rarely laid out that generously, so a correct plan routinely leaves the polygon. Whether that is a manoeuvre or a collision depends on what the boundary is made of, which only the operator knows."
+          }
+        },
+        "type": "object",
+        "required": [
+          "swath_count",
+          "track_length_m",
+          "covered_area_m2"
+        ],
+        "title": "CoverageMetrics",
+        "description": "What an operator needs in order to judge a plan before dispatching it."
+      },
+      "CoverageParams": {
+        "properties": {
+          "operation_width_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Operation Width M",
+            "description": "Working width of the implement, in metres."
+          },
+          "turning_radius_m": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Turning Radius M",
+            "description": "Minimum turning radius in metres; 0 for a robot that turns on the spot."
+          },
+          "headland_width_m": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Headland Width M",
+            "description": "Turning space kept inside the boundary, in metres. Records what the plan was built with, which is the robot's own turning radius unless the operator chose otherwise."
+          },
+          "swath_angle_deg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMaximum": 180.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Swath Angle Deg",
+            "description": "Bearing of the swath lines; the planner chooses one when omitted."
+          },
+          "allow_overlap": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Overlap",
+            "description": "Whether the last pass may overlap the one before it to cover the remainder. Absent on a plan made before it was recorded."
+          },
+          "track_width_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Width M",
+            "description": "Distance between the machine's wheels in metres, which the implement must at least span. Absent on a plan made before it was recorded."
+          },
+          "linear_curv_change": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Linear Curv Change",
+            "description": "How fast curvature may change along a turn, in 1/m2. Belongs to the machine as the turning radius does. Absent on a plan made before it was recorded."
+          },
+          "turn_sample_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Sample M",
+            "description": "How closely a turn is sampled, in metres. A turn curves, so its shape survives only in the points taken along it. Absent on a plan made before it was recorded."
+          }
+        },
+        "type": "object",
+        "required": [
+          "operation_width_m",
+          "turning_radius_m",
+          "headland_width_m"
+        ],
+        "title": "CoverageParams",
+        "description": "The inputs that determine a coverage path, as the planner was actually given them.\n\nThe turning radius reaches here from the robot's own declaration rather than from the caller,\nso the two cannot disagree. The working width does not: an implement is mounted per job, so\nonly the operator knows what is on the machine today."
+      },
+      "CoverageProvenance": {
+        "properties": {
+          "field_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Field Id"
+          },
+          "boundary_digest": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Boundary Digest"
+          },
+          "field_area_m2": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Field Area M2"
+          },
+          "mainland_boundary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Polygon"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The ground the swaths were allowed to work: the field less its headland. Held here with the rest of the geometry this plan was made against, since the field itself may be edited or deleted afterwards. Absent on a plan made before it was recorded."
+          },
+          "params": {
+            "$ref": "#/components/schemas/CoverageParams"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/CoverageMetrics"
+          },
+          "planner_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Planner Version"
+          },
+          "planned_for_robot_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Planned For Robot Id"
+          },
+          "planned_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Planned At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "field_id",
+          "boundary_digest",
+          "field_area_m2",
+          "params",
+          "metrics",
+          "planner_version",
+          "planned_for_robot_id",
+          "planned_at"
+        ],
+        "title": "CoverageProvenance",
+        "description": "How a coverage mission came to exist.\n\nHeld with the mission rather than derived on demand: the field may be edited or deleted\nafterwards, and a generated path can only be judged, reproduced, or refused for the wrong\nrobot against the inputs it was actually made from."
+      },
+      "CoverageStage": {
+        "properties": {
+          "stage_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Stage Id"
+          },
+          "on_cancel": {
+            "anyOf": [
+              {
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NavigationStage"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CoverageStage"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "coverage": "#/components/schemas/CoverageStage",
+                      "navigation": "#/components/schemas/NavigationStage"
+                    }
+                  }
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Cancel",
+            "description": "Cleanup stages executed sequentially when this stage is cancelled. Cleanup stages are themselves non-cancellable."
+          },
+          "kind": {
+            "type": "string",
+            "const": "coverage",
+            "title": "Kind",
+            "default": "coverage"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/Segment"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Segments",
+            "description": "The whole stage as one ordered route. Concatenating the segments gives the drivable line, turns included; the kinds say which of it is a worked swath. Consecutive segments share an endpoint, which a receiver joining them skips."
+          }
+        },
+        "type": "object",
+        "required": [
+          "stage_id",
+          "segments"
+        ],
+        "title": "CoverageStage",
+        "description": "Cover a field by driving its swaths in order, each reached by the turn before it."
+      },
+      "CoverageStageInput": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "coverage",
+            "title": "Kind",
+            "default": "coverage"
+          },
+          "segments": {
+            "items": {
+              "$ref": "#/components/schemas/SegmentInput"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Segments"
+          },
+          "on_cancel": {
+            "anyOf": [
+              {
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NavigationStageInput"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CoverageStageInput"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "coverage": "#/components/schemas/CoverageStageInput",
+                      "navigation": "#/components/schemas/NavigationStageInput"
+                    }
+                  }
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Cancel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "segments"
+        ],
+        "title": "CoverageStageInput",
+        "description": "Cover a field by driving its swaths, each reached by the turn before it.\n\nIdentity is assigned by the backend, exactly as for a navigation stage."
+      },
       "ErrorOrigin": {
         "type": "string",
         "enum": [
@@ -1425,6 +1819,108 @@
         ],
         "title": "MissionAssignBody"
       },
+      "MissionCoverageCreate": {
+        "properties": {
+          "field_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Field Id",
+            "description": "Field to cover, from list_fields."
+          },
+          "robot_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Robot Id",
+            "description": "Robot the plan is computed for."
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name",
+            "description": "Mission name. Defaults to the field's own name; do not ask for one."
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "operation_width_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Operation Width M",
+            "description": "Working width of the mounted implement, in metres, and the one value only the operator knows. It is not the robot's own width: an implement is usually wider than the machine carrying it, and a plan built from the machine's width covers the field in far too many passes. Never take it from a robot's declared width; ask."
+          },
+          "headland_width_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headland Width M",
+            "description": "Turning space kept inside the field, in metres. Omit it unless the operator states one: left open, the planner uses the robot's own turning radius, which is what a turn needs to stay inside the boundary."
+          },
+          "swath_angle_deg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMaximum": 180.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Swath Angle Deg",
+            "description": "Bearing of the swath lines; the planner chooses one when omitted."
+          },
+          "allow_overlap": {
+            "type": "boolean",
+            "title": "Allow Overlap",
+            "description": "Whether the last pass may overlap the one before it. A field is rarely a whole number of passes wide; leaving the remainder unworked is the alternative. Set it false only when working ground twice is worse than missing a strip.",
+            "default": false
+          },
+          "replaces": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaces",
+            "description": "A coverage mission over the same field that this plan supersedes; it is deleted once the new one exists. Pass it when the operator wants an existing plan changed rather than a second one, because a plan is re-derived rather than edited."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "field_id",
+          "robot_id",
+          "operation_width_m"
+        ],
+        "title": "MissionCoverageCreate",
+        "description": "Request a coverage mission over a stored field.\n\nDeliberately flat and geometry-free: every value is a number or an id the caller already has,\nand the path itself comes from the field's own boundary."
+      },
       "MissionCreate": {
         "properties": {
           "name": {
@@ -1446,7 +1942,21 @@
           },
           "stages": {
             "items": {
-              "$ref": "#/components/schemas/NavigationStageInput"
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/NavigationStageInput"
+                },
+                {
+                  "$ref": "#/components/schemas/CoverageStageInput"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "coverage": "#/components/schemas/CoverageStageInput",
+                  "navigation": "#/components/schemas/NavigationStageInput"
+                }
+              }
             },
             "type": "array",
             "minItems": 1,
@@ -1575,7 +2085,21 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/NavigationStageInput"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NavigationStageInput"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CoverageStageInput"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "coverage": "#/components/schemas/CoverageStageInput",
+                      "navigation": "#/components/schemas/NavigationStageInput"
+                    }
+                  }
                 },
                 "type": "array"
               },
@@ -1617,7 +2141,21 @@
           },
           "stages": {
             "items": {
-              "$ref": "#/components/schemas/NavigationStage"
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/NavigationStage"
+                },
+                {
+                  "$ref": "#/components/schemas/CoverageStage"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "coverage": "#/components/schemas/CoverageStage",
+                  "navigation": "#/components/schemas/NavigationStage"
+                }
+              }
             },
             "type": "array",
             "title": "Stages"
@@ -1671,6 +2209,16 @@
               }
             ],
             "title": "Failure Errors"
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -1688,6 +2236,20 @@
         ],
         "title": "MissionView"
       },
+      "NavigationCapability": {
+        "properties": {
+          "supported_waypoint_kinds": {
+            "items": {
+              "$ref": "#/components/schemas/WaypointKind"
+            },
+            "type": "array",
+            "title": "Supported Waypoint Kinds"
+          }
+        },
+        "type": "object",
+        "title": "NavigationCapability",
+        "description": "Capabilities specific to executing NAVIGATION stages."
+      },
       "NavigationStage": {
         "properties": {
           "stage_id": {
@@ -1699,7 +2261,21 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/NavigationStage"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NavigationStage"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CoverageStage"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "coverage": "#/components/schemas/CoverageStage",
+                      "navigation": "#/components/schemas/NavigationStage"
+                    }
+                  }
                 },
                 "type": "array"
               },
@@ -1783,7 +2359,21 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/NavigationStageInput"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NavigationStageInput"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CoverageStageInput"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "coverage": "#/components/schemas/CoverageStageInput",
+                      "navigation": "#/components/schemas/NavigationStageInput"
+                    }
+                  }
                 },
                 "type": "array"
               },
@@ -1801,6 +2391,29 @@
         ],
         "title": "NavigationStageInput",
         "description": "Drive the robot through an ordered list of waypoints, as requested by a caller.\n\nIdentity is deliberately absent, and that is the point: ``stage_id`` is assigned by the\nbackend, so no caller can choose one. Two stages sharing an id would collapse onto a single\n``mission_stage_state`` row, leaving the robot's per-stage reports unattributable."
+      },
+      "PhysicalParameters": {
+        "properties": {
+          "track_width_m": {
+            "type": "number",
+            "exclusiveMinimum": 0.0,
+            "title": "Track Width M",
+            "description": "Distance between the wheels in metres, centre to centre."
+          },
+          "min_turning_radius_m": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Min Turning Radius M",
+            "description": "Zero declares a robot that turns on the spot."
+          }
+        },
+        "type": "object",
+        "required": [
+          "track_width_m",
+          "min_turning_radius_m"
+        ],
+        "title": "PhysicalParameters",
+        "description": "Fixed physical properties of the machine, declared by the robot itself."
       },
       "Polygon": {
         "properties": {
@@ -1981,6 +2594,51 @@
         "maxItems": 3,
         "minItems": 3
       },
+      "RobotFactsheet": {
+        "properties": {
+          "robot_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Robot Id"
+          },
+          "navigation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NavigationCapability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CoverageCapability"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "physical_parameters": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PhysicalParameters"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "robot_id"
+        ],
+        "title": "RobotFactsheet",
+        "description": "What a robot can do, cached by the backend to pre-flight-validate dispatch.\n\nA present per-kind capability (``navigation``) declares the robot supports\nthat stage kind. ``robot_id`` is stamped from the transport key on ingest,\nnot carried in the wire payload."
+      },
       "RobotStatus": {
         "type": "string",
         "enum": [
@@ -2032,6 +2690,16 @@
           },
           "status": {
             "$ref": "#/components/schemas/RobotStatus"
+          },
+          "factsheet": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RobotFactsheet"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2043,6 +2711,89 @@
           "status"
         ],
         "title": "RobotView"
+      },
+      "Segment": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "swath",
+              "turn"
+            ],
+            "title": "Kind"
+          },
+          "waypoints": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/WGS84Waypoint"
+                },
+                {
+                  "$ref": "#/components/schemas/SiteLocalWaypoint"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "site_local": "#/components/schemas/SiteLocalWaypoint",
+                  "wgs84": "#/components/schemas/WGS84Waypoint"
+                }
+              }
+            },
+            "type": "array",
+            "minItems": 2,
+            "title": "Waypoints",
+            "description": "The line to drive, in order. Two waypoints describe a straight run; more describe a curve, which cannot be recovered from its endpoints."
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "waypoints"
+        ],
+        "title": "Segment",
+        "description": "One swath across a field, or the turn joining two of them.\n\nThe distinction is the reason coverage is a stage kind of its own. The ground under a swath is\nwhat gets worked, so a robot that took any convenient path between the same two endpoints would\nleave the strip beside it unworked; the ground under a turn is worked by nothing."
+      },
+      "SegmentInput": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "swath",
+              "turn"
+            ],
+            "title": "Kind"
+          },
+          "waypoints": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/WGS84Waypoint"
+                },
+                {
+                  "$ref": "#/components/schemas/SiteLocalWaypoint"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "site_local": "#/components/schemas/SiteLocalWaypoint",
+                  "wgs84": "#/components/schemas/WGS84Waypoint"
+                }
+              }
+            },
+            "type": "array",
+            "minItems": 2,
+            "title": "Waypoints"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "waypoints"
+        ],
+        "title": "SegmentInput",
+        "description": "One swath across a field, or the turn joining two of them."
       },
       "SiteCreate": {
         "properties": {
@@ -2510,6 +3261,15 @@
         ],
         "title": "WGS84Waypoint",
         "description": "A waypoint anchored in the WGS84 geographic frame."
+      },
+      "WaypointKind": {
+        "type": "string",
+        "enum": [
+          "wgs84",
+          "site_local"
+        ],
+        "title": "WaypointKind",
+        "description": "A coordinate frame a waypoint can use; mirrors the Waypoint variants."
       }
     }
   }

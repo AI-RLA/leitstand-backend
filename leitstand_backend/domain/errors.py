@@ -23,6 +23,41 @@ class FieldNotFoundError(DomainError):
         self.field_id = field_id
 
 
+class FieldNotPlannable(DomainError):
+    """The field's geometry has no usable area, so no path can be derived from it."""
+
+    def __init__(self, field_id: UUID):
+        super().__init__(f"field {field_id} has no area; its geometry is empty or degenerate")
+        self.field_id = field_id
+
+
+class RobotPhysicalParametersMissing(DomainError):
+    """The robot's factsheet declares no width or turning radius, so no path can be planned for it."""
+
+    def __init__(self, robot_id: str):
+        super().__init__(
+            f"robot {robot_id!r} has not declared its physical parameters, "
+            "so a path cannot be planned for it"
+        )
+        self.robot_id = robot_id
+
+
+class CoveragePlanRejected(DomainError):
+    """A returned coverage plan failed a validity check, so no mission was created."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"coverage plan rejected: {reason}")
+        self.reason = reason
+
+
+class CoveragePlannerUnavailable(DomainError):
+    """No coverage planner is configured, or none answered."""
+
+    def __init__(self, reason: str | None = None):
+        super().__init__(reason or "no coverage planner is configured")
+        self.reason = reason
+
+
 class MissionNotFoundError(DomainError):
     def __init__(self, mission_id: UUID):
         super().__init__(f"mission {mission_id} not found")
@@ -101,6 +136,53 @@ class UnsupportedWaypointFrame(DomainError):
         self.frame = frame
 
 
+class IncompatibleTurningRadius(DomainError):
+    """Robot cannot make the turns a generated plan was laid out for."""
+
+    def __init__(self, robot_id: str, robot_radius_m: float, plan_radius_m: float):
+        super().__init__(
+            f"robot {robot_id!r} turns at {robot_radius_m} m, wider than the {plan_radius_m} m "
+            "this plan was laid out for; re-plan it for this robot"
+        )
+        self.robot_id = robot_id
+        self.robot_radius_m = robot_radius_m
+        self.plan_radius_m = plan_radius_m
+
+
+class ImplementNarrowerThanRobot(DomainError):
+    """Robot is wider than the implement a generated plan spaced its swaths for."""
+
+    def __init__(self, robot_id: str, track_width_m: float, operation_width_m: float):
+        super().__init__(
+            f"robot {robot_id!r} has a {track_width_m} m wheel track, wider than the "
+            f"{operation_width_m} m implement this plan spaced its swaths for; its wheels would "
+            "run over worked ground"
+        )
+        self.robot_id = robot_id
+        self.track_width_m = track_width_m
+        self.operation_width_m = operation_width_m
+
+
+class GeneratedPlanNotEditable(DomainError):
+    """Stages of a mission a planner produced cannot be replaced by hand."""
+
+    def __init__(self, mission_id: UUID):
+        super().__init__(
+            f"mission {mission_id} was planned rather than typed; re-plan it instead of "
+            "replacing its stages"
+        )
+        self.mission_id = mission_id
+
+
+class StaleCoverageBoundary(DomainError):
+    """Field a coverage plan was derived from no longer matches what the plan was made against."""
+
+    def __init__(self, field_id: UUID, reason: str):
+        super().__init__(f"field {field_id} {reason} since this plan was made; re-plan it")
+        self.field_id = field_id
+        self.reason = reason
+
+
 class RobotBusy(DomainError):
     """Dispatch rejected because the robot already has a non-terminal mission assigned."""
 
@@ -111,10 +193,17 @@ class RobotBusy(DomainError):
 
 
 class RobotFactsheetMissing(DomainError):
-    """No factsheet has been received for the target robot."""
+    """No factsheet for the target robot, which may not exist at all.
+
+    A factsheet view is the only robot fact the mission path holds, so a robot that has never
+    registered and an id that names nothing are indistinguishable from here. The message says
+    both rather than the one it happens to be named for.
+    """
 
     def __init__(self, robot_id: str):
-        super().__init__(f"no factsheet on file for robot {robot_id!r}")
+        super().__init__(
+            f"no factsheet for robot {robot_id!r}, which may not exist or may not have registered"
+        )
         self.robot_id = robot_id
 
 

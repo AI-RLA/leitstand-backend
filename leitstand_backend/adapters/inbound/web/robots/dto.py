@@ -7,6 +7,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from leitstand_backend.domain.model.robot.robot import Metadata
+from leitstand_backend.domain.model.robot.robot_factsheet import RobotFactsheet
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
 from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
 
@@ -19,3 +20,4 @@ class RobotView(BaseModel):
     pose: Pose | None = None
     battery: Battery | None = None
     status: RobotStatus
+    factsheet: RobotFactsheet | None = None

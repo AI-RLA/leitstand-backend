@@ -70,6 +70,11 @@ class PostgresRobotRepositoryAdapter(RobotRepository):
             update(RobotRow).where(RobotRow.id == robot_id).values({col: payload})
         )
 
+    async def save_factsheet(self, robot_id: str, payload: dict) -> None:
+        await self._session.execute(
+            update(RobotRow).where(RobotRow.id == robot_id).values(factsheet_json=payload)
+        )
+
 
 def _to_domain(row: RobotRow) -> Robot:
     return Robot(

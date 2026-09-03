@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from leitstand_backend.adapters.inbound.web.missions.dto import (
     MissionAssignBody,
+    MissionCoverageCreate,
     MissionCreate,
     MissionDispatchBody,
     MissionUpdate,
@@ -21,6 +22,7 @@ from leitstand_backend.adapters.inbound.web.missions.mappers import (
     to_dispatch_command,
     to_mission_view,
     to_pause_command,
+    to_plan_coverage_command,
     to_reset_command,
     to_resume_command,
     to_unassign_command,
@@ -31,6 +33,13 @@ from leitstand_backend.application.mission_state_view import (
     build_mission_state_view,
 )
 from leitstand_backend.domain.errors import (
+    CoveragePlannerUnavailable,
+    CoveragePlanRejected,
+    FieldNotFoundError,
+    FieldNotPlannable,
+    GeneratedPlanNotEditable,
+    ImplementNarrowerThanRobot,
+    IncompatibleTurningRadius,
     InvalidMissionTransition,
     MissionDispatchTimeout,
     MissionNotFoundError,
@@ -38,16 +47,21 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotPhysicalParametersMissing,
     StageNotHomogeneous,
+    StaleCoverageBoundary,
     UnknownSite,
     UnknownSiteForRobot,
     UnsupportedStageKind,
+    UnsupportedWaypointFrame,
 )
 from leitstand_backend.infrastructure.deps import (
+    get_coverage_planning_use_case,
     get_dispatch_use_case,
     get_mission_management_use_case,
     get_mission_repository,
 )
+from leitstand_backend.ports.inbound.coverage_planning import CoveragePlanningUseCase
 from leitstand_backend.ports.inbound.mission_management import MissionManagementUseCase
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 
@@ -125,7 +139,8 @@ async def create_mission(
     Every waypoint must be a coordinate the operator stated. Do not compute one: not from a field
     or site boundary, not from a robot's current position, and not by converting a distance in
     metres into degrees. If you were given an area, a row spacing or a bearing rather than
-    coordinates, do not call this; say you cannot work them out and ask for them.
+    coordinates, do not call this: use plan_coverage_mission for a field that should be covered, and
+    otherwise say you cannot work the coordinates out and ask for them.
 
     ``stages`` is a list of stage objects, not text containing a list.
 
@@ -140,6 +155,50 @@ async def create_mission(
     return to_mission_view(record)  # type: ignore[arg-type]
 
 
+@router.post(
+    "/coverage",
+    response_model=MissionView,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="plan_coverage_mission",
+)
+async def plan_coverage_mission(
+    body: MissionCoverageCreate,
+    uc: CoveragePlanningUseCase = Depends(get_coverage_planning_use_case),
+    repo: MissionRepository = Depends(get_mission_repository),
+) -> MissionView:
+    """Create a mission that covers a whole field, planned from the field's own boundary.
+
+    Use this whenever the operator asks to cover, survey, mow or treat a field rather than to
+    drive to stated points. Give the field_id, the robot the plan is for, and the working width
+    in metres; supply no coordinates, because the path is computed from the stored boundary, and
+    no turning radius, because the robot declares its own.
+
+    The mission is created as a draft and is not dispatched. Its coverage metrics come back with
+    it, so the operator can judge the plan before dispatching it.
+    """
+    try:
+        mission = await uc.plan(to_plan_coverage_command(body))
+    except FieldNotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "field not found")
+    except MissionNotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission to replace not found")
+    except InvalidMissionTransition as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    except (
+        CoveragePlanRejected,
+        FieldNotPlannable,
+        RobotFactsheetMissing,
+        RobotPhysicalParametersMissing,
+        StageNotHomogeneous,
+        UnsupportedStageKind,
+    ) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    except CoveragePlannerUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
+    record = await repo.get_record(mission.mission_id)
+    return to_mission_view(record)  # type: ignore[arg-type]
+
+
 @router.patch("/{mission_id}", response_model=MissionView, operation_id="update_mission")
 async def update_mission(
     mission_id: UUID,
@@ -150,7 +209,7 @@ async def update_mission(
     """Change a draft mission's name, description, or stages.
 
     Only a mission still in DRAFT can be updated. Identify it by mission_id from list_missions.
-    Supplying stages replaces the existing ones.
+    Supplying stages replaces the existing ones, which a planned mission refuses: re-plan it.
     """
     try:
         mission = await uc.update(to_update_command(mission_id, body))
@@ -158,7 +217,7 @@ async def update_mission(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
     except InvalidMissionTransition as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    except (StageNotHomogeneous, UnknownSite) as exc:
+    except (StageNotHomogeneous, UnknownSite, GeneratedPlanNotEditable) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     record = await repo.get_record(mission.mission_id)
     return to_mission_view(record)  # type: ignore[arg-type]
@@ -206,7 +265,16 @@ async def assign_mission(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     except RobotFactsheetMissing as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    except (StageNotHomogeneous, UnsupportedStageKind, UnknownSiteForRobot) as exc:
+    except (
+        StageNotHomogeneous,
+        UnsupportedStageKind,
+        UnknownSiteForRobot,
+        UnsupportedWaypointFrame,
+        IncompatibleTurningRadius,
+        ImplementNarrowerThanRobot,
+        RobotPhysicalParametersMissing,
+        StaleCoverageBoundary,
+    ) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     record = await repo.get_record(mission.mission_id)
     return to_mission_view(record)  # type: ignore[arg-type]
@@ -258,7 +326,16 @@ async def dispatch_mission(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     except RobotFactsheetMissing as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    except (StageNotHomogeneous, UnsupportedStageKind, UnknownSiteForRobot) as exc:
+    except (
+        StageNotHomogeneous,
+        UnsupportedStageKind,
+        UnknownSiteForRobot,
+        UnsupportedWaypointFrame,
+        IncompatibleTurningRadius,
+        ImplementNarrowerThanRobot,
+        RobotPhysicalParametersMissing,
+        StaleCoverageBoundary,
+    ) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     except MissionRejectedByRobot as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))

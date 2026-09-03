@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
 from leitstand_backend.domain.model.mission.mission import Mission, MissionStatus
 from leitstand_backend.domain.model.mission.mission_state import MissionError
 from leitstand_backend.domain.model.mission.stage_state_record import StageStateRecord
@@ -21,6 +22,7 @@ class MissionRecord(BaseModel):
     robot_id: str | None
     dispatched_at: datetime | None
     failure_errors: list[MissionError] | None = None
+    coverage: CoverageProvenance | None = None
 
 
 class MissionRepository(ABC):
@@ -81,6 +83,18 @@ class MissionRepository(ABC):
     async def get_assigned_robot(self, mission_id: UUID) -> str | None: ...
 
     @abstractmethod
+    async def save_coverage_provenance(
+        self,
+        mission_id: UUID,
+        provenance: CoverageProvenance,
+    ) -> None:
+        """Record how a mission's stages were derived.
+
+        Written in the same transaction as the mission it describes, so a mission whose geometry
+        nobody authored by hand never exists without the record of what produced it.
+        """
+
+    @abstractmethod
     async def upsert_stage_states(
         self,
         mission_id: UUID,
@@ -132,6 +146,14 @@ class MissionRepository(ABC):
 
         ``robot_id`` filters to that robot's missions and ``name`` matches case-insensitively;
         each omitted filter widens the result. Both together are an AND.
+        """
+
+    @abstractmethod
+    async def executing_robot_ids(self) -> set[str]:
+        """Return the ids of robots that currently have an executing mission.
+
+        A set rather than the missions themselves, because the fleet view only asks whether a
+        robot is busy and a mission carries its whole stage list.
         """
 
     @abstractmethod

@@ -9,12 +9,14 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from uuid import UUID
 
+import httpx
 import structlog
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from geojson_pydantic import Polygon
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -54,11 +56,16 @@ from leitstand_backend.adapters.outbound.persistence.postgres.models import Robo
 from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_adapter import (
     PostgresRobotRepositoryAdapter,
 )
+from leitstand_backend.adapters.outbound.planning.http_coverage_planner_adapter import (
+    HttpCoveragePlannerAdapter,
+)
 from leitstand_backend.application.mission_state_service import MissionStateService
 from leitstand_backend.application.robot_connectivity_service import RobotConnectivityService
 from leitstand_backend.application.robot_factsheet_service import RobotFactsheetService
 from leitstand_backend.application.robot_telemetry_service import RobotTelemetryService
 from leitstand_backend.domain import event_topics
+from leitstand_backend.domain.errors import CoveragePlannerUnavailable
+from leitstand_backend.domain.model.mission.coverage import CoverageParams, CoveragePlan
 from leitstand_backend.domain.model.mission.mission import Mission
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.infrastructure.auth import CredentialContextMiddleware
@@ -91,6 +98,8 @@ from leitstand_backend.ports.inbound.robot_connectivity import (
     RecordOnlineCommand,
     RobotConnectivityUseCase,
 )
+from leitstand_backend.ports.inbound.robot_factsheet import RobotFactsheetUseCase
+from leitstand_backend.ports.outbound.coverage_planner import CoveragePlanner
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 
 logger = structlog.get_logger(__name__)
@@ -135,6 +144,9 @@ async def _seed_event_bus_from_db(
         for kind, payload in [
             ("pose", row.last_pose),
             ("battery", row.last_battery),
+            # Re-latching the factsheet is what lets dispatch validate against a robot that has
+            # not reconnected since this process started; the view reads the latch, not the row.
+            ("factsheet", row.factsheet_json),
         ]:
             if payload is not None:
                 bus.publish(event_topics.robot_topic(row.id, kind), payload, latch=True)
@@ -160,6 +172,38 @@ class _NullMissionDispatcher(MissionDispatcher):
 
     async def resume(self, mission_id: UUID, robot_id: str) -> None:
         pass
+
+
+class _NullCoveragePlanner(CoveragePlanner):
+    """Refuse every plan, so the route answers 503 until a planner is deployed.
+
+    Coverage planning is a soft dependency in the same sense the model endpoint is: its absence
+    must cost the operator the planning route and nothing else.
+    """
+
+    async def plan(self, boundary: Polygon, params: CoverageParams) -> CoveragePlan:
+        raise CoveragePlannerUnavailable()
+
+
+def _build_coverage_planner(
+    settings: Settings,
+) -> tuple[CoveragePlanner, httpx.AsyncClient | None]:
+    """Return the configured planner and the client it borrows, or one that refuses.
+
+    Constructed without contacting anything: the service is reached at planning time, so a planner
+    that is down costs a planning request and never a boot. The client is returned rather than
+    owned, so one connection pool serves the process and the caller closes it on shutdown.
+    """
+    if not settings.coverage_planner_url:
+        logger.info("coverage_planner_unconfigured")
+        return _NullCoveragePlanner(), None
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            settings.coverage_planner_read_timeout_s,
+            connect=settings.coverage_planner_connect_timeout_s,
+        )
+    )
+    return HttpCoveragePlannerAdapter(settings.coverage_planner_url, client), client
 
 
 class _SessionScopedMissionStateUseCase(MissionStateUseCase):
@@ -191,6 +235,29 @@ class _SessionScopedMissionStateUseCase(MissionStateUseCase):
             await MissionStateService(
                 repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
             ).handle_robot_offline(command)
+
+
+class _SessionScopedFactsheetUseCase(RobotFactsheetUseCase):
+    """Wraps RobotFactsheetService so each call opens its own DB session.
+
+    Called from the Zenoh factsheet adapter's executor thread when a robot comes online, so
+    concurrent arrivals must not share session state.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        bus: EventBus,
+    ) -> None:
+        self._session_factory = session_factory
+        self._bus = bus
+
+    async def record(self, command) -> None:
+        async with transactional_scope(self._session_factory) as s:
+            repo = PostgresRobotRepositoryAdapter(s)
+            await RobotFactsheetService(
+                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+            ).record(command)
 
 
 class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
@@ -314,8 +381,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(_run_migrations, settings.database_url_str)
             logger.info("migrations_applied")
 
-        if not settings.zenoh_disabled:
+        # Seeding needs a database, not Zenoh, so it shares the ping's condition.
+        # A persisted factsheet has to be readable before dispatch either way.
+        if settings.auto_migrate or not settings.zenoh_disabled:
             await _seed_event_bus_from_db(session_factory, bus)
+
+        # Marking offline is Zenoh's concern: with no subscriber to follow, the flags would lie.
+        if not settings.zenoh_disabled:
             await _bulk_mark_offline(session_factory)
 
         loop = asyncio.get_running_loop()
@@ -345,7 +417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise SystemExit(1) from None
 
             telemetry_uc = RobotTelemetryService(events=bus)
-            factsheet_uc = RobotFactsheetService(events=bus)
+            factsheet_uc = _SessionScopedFactsheetUseCase(session_factory, bus)
             mission_state_uc = _SessionScopedMissionStateUseCase(session_factory, bus)
             mission_dispatcher = ZenohMissionDispatcherAdapter(z_session)
             factsheet_adapter = ZenohRobotFactsheetAdapter(z_session, factsheet_uc, loop)
@@ -385,6 +457,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.state_view = state_view
         app.state.factsheet_view = factsheet_view
         app.state.mission_dispatcher = mission_dispatcher
+        app.state.coverage_planner, coverage_planner_client = _build_coverage_planner(settings)
         app.state.connectivity_uc = connectivity_uc
         app.state.connectivity_adapter = connectivity_adapter
         app.state.robot_status_projector = robot_status_projector
@@ -414,6 +487,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            if coverage_planner_client is not None:
+                try:
+                    await coverage_planner_client.aclose()
+                except Exception:  # noqa: BLE001
+                    logger.warning("coverage_planner_client_close_error")
             if chat_mcp_client is not None:
                 try:
                     await chat_mcp_client.aclose()

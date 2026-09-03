@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -38,9 +38,28 @@ class NavigationStageInput(BaseModel):
     )
 
 
-StageInput = NavigationStageInput
+class SegmentInput(BaseModel):
+    """One swath across a field, or the turn joining two of them."""
+
+    kind: Literal["swath", "turn"]
+    waypoints: list[Waypoint] = Field(min_length=2)
+
+
+class CoverageStageInput(BaseModel):
+    """Cover a field by driving its swaths, each reached by the turn before it.
+
+    Identity is assigned by the backend, exactly as for a navigation stage.
+    """
+
+    kind: Literal["coverage"] = "coverage"
+    segments: list[SegmentInput] = Field(min_length=1)
+    on_cancel: list["StageInput"] | None = None
+
+
+StageInput = Annotated[NavigationStageInput | CoverageStageInput, Field(discriminator="kind")]
 
 NavigationStageInput.model_rebuild()
+CoverageStageInput.model_rebuild()
 
 
 class CreateMissionCommand(BaseModel):

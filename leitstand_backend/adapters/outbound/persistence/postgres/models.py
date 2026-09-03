@@ -41,6 +41,7 @@ class RobotRow(Base):
     online: Mapped[bool] = mapped_column(Boolean, nullable=False)
     last_pose: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     last_battery: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    factsheet_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class FieldRow(Base):
@@ -52,7 +53,9 @@ class FieldRow(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     geometry: Mapped[Any] = mapped_column(Geometry("POLYGON", srid=4326), nullable=False)
     area_ha: Mapped[float | None] = mapped_column(
-        Numeric(8, 3),
+        # Six decimals of a hectare resolve a hundredth of a square metre, so a small plot is not
+        # quantised into disagreeing with the area a planner measures for it.
+        Numeric(12, 6),
         Computed("ST_Area(geometry::geography) / 10000.0", persisted=True),
         nullable=True,
     )
@@ -113,6 +116,9 @@ class MissionRow(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
     failure_errors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Null for a hand-authored mission. Denormalised rather than joined to the field, so the
+    # inputs a generated path was made from survive that field being edited or deleted.
+    coverage: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class MissionStageStateRow(Base):

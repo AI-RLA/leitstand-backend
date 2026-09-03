@@ -73,6 +73,17 @@ class InMemoryFieldRepository(FieldRepository):
         with self._lock:
             return self._fields.pop(field_id, None) is not None
 
+    # Test-only population helper -------------------------------------------------
+
+    def seed(self, field: Field) -> None:
+        """Store a field verbatim, area included.
+
+        ``create`` derives the area through shapely, which is optional here and yields 0.0 when
+        absent; a test that depends on a specific area must state it rather than inherit that.
+        """
+        with self._lock:
+            self._fields[field.id] = field
+
 
 def _polygon_area_ha(geometry: Polygon) -> float:
     try:

@@ -3,10 +3,12 @@
 from uuid import UUID
 
 from leitstand_backend.adapters.inbound.web.missions.dto import (
+    MissionCoverageCreate,
     MissionCreate,
     MissionUpdate,
     MissionView,
 )
+from leitstand_backend.ports.inbound.coverage_planning import PlanCoverageCommand
 from leitstand_backend.ports.inbound.mission_management import (
     AssignMissionCommand,
     CancelMissionCommand,
@@ -24,6 +26,20 @@ from leitstand_backend.ports.outbound.mission_repository import MissionRecord
 
 def to_create_command(req: MissionCreate) -> CreateMissionCommand:
     return CreateMissionCommand(name=req.name, description=req.description, stages=req.stages)
+
+
+def to_plan_coverage_command(req: MissionCoverageCreate) -> PlanCoverageCommand:
+    return PlanCoverageCommand(
+        field_id=req.field_id,
+        robot_id=req.robot_id,
+        name=req.name,
+        description=req.description,
+        operation_width_m=req.operation_width_m,
+        headland_width_m=req.headland_width_m,
+        swath_angle_deg=req.swath_angle_deg,
+        allow_overlap=req.allow_overlap,
+        replaces=req.replaces,
+    )
 
 
 def to_update_command(mission_id: UUID, req: MissionUpdate) -> UpdateMissionCommand:
@@ -81,4 +97,5 @@ def to_mission_view(record: MissionRecord) -> MissionView:
         created_at=m.created_at,
         updated_at=m.updated_at,
         failure_errors=record.failure_errors,
+        coverage=record.coverage,
     )

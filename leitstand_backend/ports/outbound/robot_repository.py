@@ -38,3 +38,11 @@ class RobotRepository(ABC):
         ``kind`` is one of ``"pose"``, ``"battery"``, ``"state"``.
         No-op if the robot row does not exist yet.
         """
+
+    @abstractmethod
+    async def save_factsheet(self, robot_id: str, payload: dict) -> None:
+        """Persist the robot's latest capability declaration.
+
+        A no-op when the robot has no row yet: connectivity and the factsheet arrive on separate
+        subscriptions, so a first registration can leave it latched but not durable until reconnect.
+        """

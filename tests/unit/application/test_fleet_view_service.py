@@ -11,9 +11,16 @@ from leitstand_backend.application.fleet_view_service import FleetViewService
 from leitstand_backend.domain.model.mission.mission import Mission, MissionStatus, NavigationStage
 from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
 from leitstand_backend.domain.model.robot.robot import Metadata
+from leitstand_backend.domain.model.robot.robot_factsheet import (
+    NavigationCapability,
+    PhysicalParameters,
+    RobotFactsheet,
+    WaypointKind,
+)
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
 from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
 from tests.fakes.in_memory_mission_repository import InMemoryMissionRepository
+from tests.fakes.in_memory_robot_factsheet_view import InMemoryRobotFactsheetView
 from tests.fakes.in_memory_robot_repository import InMemoryRobotRepository
 from tests.fakes.in_memory_robot_state_view import InMemoryRobotStateView
 
@@ -24,11 +31,13 @@ def _make_svc(
     repo: InMemoryRobotRepository,
     state_view: InMemoryRobotStateView | None = None,
     missions: InMemoryMissionRepository | None = None,
+    factsheets: InMemoryRobotFactsheetView | None = None,
 ) -> FleetViewService:
     return FleetViewService(
         repo=repo,
         state_view=state_view or InMemoryRobotStateView(),
         missions=missions or InMemoryMissionRepository(),
+        factsheets=factsheets or InMemoryRobotFactsheetView(),
     )
 
 
@@ -133,3 +142,35 @@ async def test_status_offline_overrides_executing_mission() -> None:
 
     assert overview is not None
     assert overview.status == RobotStatus.OFFLINE
+
+
+@pytest.mark.asyncio
+async def test_overview_carries_the_robots_declared_factsheet():
+    """The backend refuses work on the strength of it, so an operator must be able to read it."""
+    repo = InMemoryRobotRepository()
+    await repo.record_online("r1", Metadata(id="r1"))
+    factsheets = InMemoryRobotFactsheetView()
+    factsheets.set(
+        RobotFactsheet(
+            robot_id="r1",
+            navigation=NavigationCapability(supported_waypoint_kinds=[WaypointKind.WGS84]),
+            physical_parameters=PhysicalParameters(track_width_m=0.58, min_turning_radius_m=0.0),
+        )
+    )
+
+    overview = await _make_svc(repo, factsheets=factsheets).get_robot("r1")
+
+    assert overview is not None
+    assert overview.factsheet is not None
+    assert overview.factsheet.physical_parameters.track_width_m == 0.58
+
+
+@pytest.mark.asyncio
+async def test_a_robot_that_declared_nothing_carries_no_factsheet():
+    repo = InMemoryRobotRepository()
+    await repo.record_online("r2", Metadata(id="r2"))
+
+    overview = await _make_svc(repo).get_robot("r2")
+
+    assert overview is not None
+    assert overview.factsheet is None

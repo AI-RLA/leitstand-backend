@@ -10,6 +10,9 @@ from leitstand_backend.application.mission_events import emit_mission_lifecycle
 from leitstand_backend.application.mission_state_view import build_mission_state_view
 from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.errors import (
+    GeneratedPlanNotEditable,
+    ImplementNarrowerThanRobot,
+    IncompatibleTurningRadius,
     InvalidMissionTransition,
     MissionDispatchTimeout,
     MissionNotFoundError,
@@ -17,18 +20,24 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotPhysicalParametersMissing,
     StageNotHomogeneous,
+    StaleCoverageBoundary,
     UnknownSite,
     UnsupportedStageKind,
     UnsupportedWaypointFrame,
 )
+from leitstand_backend.domain.model.mission.coverage import CoverageProvenance, boundary_digest
 from leitstand_backend.domain.model.mission.mission import (
+    CoverageStage,
     Mission,
     MissionStatus,
     NavigationStage,
+    Segment,
     Stage,
     StageKind,
     referenced_site_ids,
+    stage_waypoints,
 )
 from leitstand_backend.domain.model.mission.mission_lifecycle import (
     MissionTrigger,
@@ -45,6 +54,7 @@ from leitstand_backend.domain.model.robot.robot_factsheet import RobotFactsheet,
 from leitstand_backend.ports.inbound.mission_management import (
     AssignMissionCommand,
     CancelMissionCommand,
+    CoverageStageInput,
     CreateMissionCommand,
     DeleteMissionCommand,
     DispatchMissionCommand,
@@ -58,6 +68,7 @@ from leitstand_backend.ports.inbound.mission_management import (
 )
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
 from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.field_repository import FieldRepository
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 from leitstand_backend.ports.outbound.robot_factsheet_view import RobotFactsheetView
@@ -73,6 +84,7 @@ class MissionManagementService(MissionManagementUseCase):
         events: EventPublisher,
         audit: AuditWriter,
         sites: SiteRepository,
+        fields: FieldRepository,
     ):
         self._repo = repo
         self._dispatcher = dispatcher
@@ -80,6 +92,7 @@ class MissionManagementService(MissionManagementUseCase):
         self._events = events
         self._audit = audit
         self._sites = sites
+        self._fields = fields
 
     async def create(self, command: CreateMissionCommand) -> Mission:
         _validate_homogeneity(command.stages)
@@ -101,6 +114,12 @@ class MissionManagementService(MissionManagementUseCase):
             str(saved.mission_id),
             command.model_dump(mode="json"),
         )
+        # Not a lifecycle event: a mission comes into existence rather than transitioning into it.
+        # Announced anyway, or a mission created in one place stays invisible everywhere else.
+        self._events.publish(
+            event_topics.mission_topic(saved.mission_id, "created"),
+            {"mission_id": str(saved.mission_id)},
+        )
         return saved
 
     async def update(self, command: UpdateMissionCommand) -> Mission:
@@ -112,6 +131,10 @@ class MissionManagementService(MissionManagementUseCase):
         before = record.mission
         if record.status is not MissionStatus.DRAFT:
             raise InvalidMissionTransition(record.status, "update")
+        # The provenance describes these stages; editing them would leave it describing a path
+        # that is gone.
+        if command.stages is not None and record.coverage is not None:
+            raise GeneratedPlanNotEditable(command.mission_id)
 
         patch = {
             "name": command.name if command.name is not None else before.name,
@@ -154,6 +177,8 @@ class MissionManagementService(MissionManagementUseCase):
         if factsheet is None:
             raise RobotFactsheetMissing(command.robot_id)
         _validate_against_factsheet(mission, command.robot_id, factsheet)
+        _validate_plan_fits_robot(command.robot_id, record.coverage, factsheet)
+        await self._require_current_boundary(record.coverage)
 
         if await self._repo.update_status(command.mission_id, target) is None:
             raise InvalidMissionTransition(current, "assign")
@@ -203,6 +228,8 @@ class MissionManagementService(MissionManagementUseCase):
         if factsheet is None:
             raise RobotFactsheetMissing(robot_id)
         _validate_against_factsheet(mission, robot_id, factsheet)
+        _validate_plan_fits_robot(robot_id, record.coverage, factsheet)
+        await self._require_current_boundary(record.coverage)
 
         if await self._repo.update_status(command.mission_id, target) is None:
             raise InvalidMissionTransition(current, "dispatch")
@@ -381,6 +408,19 @@ class MissionManagementService(MissionManagementUseCase):
             latch=True,
         )
 
+    async def _require_current_boundary(self, coverage: CoverageProvenance | None) -> None:
+        """Reject a generated plan whose field no longer looks the way it was planned from.
+
+        A hand-authored mission names no field and is not checked.
+        """
+        if coverage is None:
+            return
+        field = await self._fields.get(coverage.field_id)
+        if field is None:
+            raise StaleCoverageBoundary(coverage.field_id, "has been deleted")
+        if boundary_digest(field.geometry) != coverage.boundary_digest:
+            raise StaleCoverageBoundary(coverage.field_id, "has been edited")
+
     async def _validate_sites_exist(self, stages) -> None:
         """Reject stages referencing a site_id absent from the backend catalog.
 
@@ -401,21 +441,35 @@ def _with_ids(inputs: Sequence[StageInput]) -> list[Stage]:
     Recurses into ``on_cancel`` because cleanup stages are stages: the robot reports their
     execution under the same ``stage_id`` join, so one without an id would be unattributable.
     """
-    return [
-        NavigationStage(
-            stage_id=uuid4(),
-            kind=stage.kind,
-            waypoints=stage.waypoints,
-            on_cancel=_with_ids(stage.on_cancel) if stage.on_cancel else None,
-        )
-        for stage in inputs
-    ]
+    staged: list[Stage] = []
+    for stage in inputs:
+        on_cancel = _with_ids(stage.on_cancel) if stage.on_cancel else None
+        if isinstance(stage, CoverageStageInput):
+            staged.append(
+                CoverageStage(
+                    stage_id=uuid4(),
+                    segments=[
+                        Segment(kind=segment.kind, waypoints=segment.waypoints)
+                        for segment in stage.segments
+                    ],
+                    on_cancel=on_cancel,
+                )
+            )
+        else:
+            staged.append(
+                NavigationStage(
+                    stage_id=uuid4(),
+                    waypoints=stage.waypoints,
+                    on_cancel=on_cancel,
+                )
+            )
+    return staged
 
 
 def _validate_homogeneity(stages) -> None:
     """All waypoints in a stage must share their ``kind`` discriminator."""
     for index, stage in enumerate(stages):
-        kinds = {wp.kind for wp in stage.waypoints}
+        kinds = {wp.kind for wp in stage_waypoints(stage)}
         if len(kinds) > 1:
             raise StageNotHomogeneous(index, kinds)
 
@@ -437,11 +491,44 @@ def _validate_against_factsheet(
         except ValueError:
             raise UnsupportedStageKind(robot_id, stage.stage_id, stage.kind)
 
-        if kind is not StageKind.NAVIGATION or factsheet.navigation is None:
+        # A robot declares each stage kind it can execute. Coverage is declared separately from
+        # navigation because driving a swath as a line is a different claim from visiting points,
+        # and a robot that has not declared it is refused the mission rather than sent it anyway.
+        if kind is StageKind.NAVIGATION:
+            capability = factsheet.navigation
+        elif kind is StageKind.COVERAGE:
+            capability = factsheet.coverage
+        else:
+            capability = None
+        if capability is None:
             raise UnsupportedStageKind(robot_id, stage.stage_id, stage.kind)
 
-        supported_frames = set(factsheet.navigation.supported_waypoint_kinds)
-        for waypoint in stage.waypoints:
+        supported_frames = set(capability.supported_waypoint_kinds)
+        for waypoint in stage_waypoints(stage):
             frame = WaypointKind(waypoint.kind)
             if frame not in supported_frames:
                 raise UnsupportedWaypointFrame(robot_id, stage.stage_id, frame.value)
+
+
+def _validate_plan_fits_robot(
+    robot_id: str, coverage: CoverageProvenance | None, factsheet: RobotFactsheet
+) -> None:
+    """Reject a generated plan this machine cannot drive as it was laid out.
+
+    A tighter-turning machine can follow wider turns, but the reverse cuts every corner silently.
+    Width is checked against the implement rather than against the machine the plan was made for,
+    because swath spacing follows the implement, and a machine wider than it runs its wheels over
+    the strip just worked.
+    """
+    if coverage is None:
+        return
+    if factsheet.physical_parameters is None:
+        raise RobotPhysicalParametersMissing(robot_id)
+    robot_radius_m = factsheet.physical_parameters.min_turning_radius_m
+    plan_radius_m = coverage.params.turning_radius_m
+    if robot_radius_m > plan_radius_m:
+        raise IncompatibleTurningRadius(robot_id, robot_radius_m, plan_radius_m)
+    track_width_m = factsheet.physical_parameters.track_width_m
+    operation_width_m = coverage.params.operation_width_m
+    if track_width_m > operation_width_m:
+        raise ImplementNarrowerThanRobot(robot_id, track_width_m, operation_width_m)

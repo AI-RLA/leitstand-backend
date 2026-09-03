@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM python:3.11-slim-bookworm
 
+# Unbuffered so log lines reach the container's stdout as they happen rather than in blocks.
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # Source must be present before `pip install .` so setuptools'

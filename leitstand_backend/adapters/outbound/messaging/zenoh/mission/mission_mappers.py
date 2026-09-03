@@ -13,7 +13,13 @@ from uuid import UUID
 
 from leitstand.robot.v1 import mission_pb2
 
-from leitstand_backend.domain.model.mission.mission import Mission, NavigationStage, Stage
+from leitstand_backend.domain.model.mission.mission import (
+    CoverageStage,
+    Mission,
+    NavigationStage,
+    Segment,
+    Stage,
+)
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.domain.model.mission.waypoint import (
     SiteLocalWaypoint,
@@ -25,6 +31,25 @@ _CANCEL_MODE_TO_PROTO: dict[CancelMode, mission_pb2.CancelMode] = {
     CancelMode.GRACEFUL: mission_pb2.CANCEL_MODE_GRACEFUL,
     CancelMode.IMMEDIATE: mission_pb2.CANCEL_MODE_IMMEDIATE,
 }
+
+
+_SEGMENT_KIND_TO_PROTO: dict[str, mission_pb2.SegmentKind.ValueType] = {
+    "swath": mission_pb2.SEGMENT_KIND_SWATH,
+    "turn": mission_pb2.SEGMENT_KIND_TURN,
+}
+_SEGMENT_KIND_FROM_PROTO = {value: name for name, value in _SEGMENT_KIND_TO_PROTO.items()}
+
+
+def _segment_kind_from_proto(kind: mission_pb2.SegmentKind.ValueType, stage_id: str) -> str:
+    """Return the segment kind, refusing one the sender did not state.
+
+    Defaulting would drive a turn as though it were worked ground, which is the one mistake this
+    field exists to prevent.
+    """
+    try:
+        return _SEGMENT_KIND_FROM_PROTO[kind]
+    except KeyError:
+        raise ValueError(f"stage {stage_id}: segment carries no usable kind ({kind})") from None
 
 
 def _waypoint_to_proto(waypoint: Waypoint) -> mission_pb2.Waypoint:
@@ -46,18 +71,33 @@ def _waypoint_to_proto(waypoint: Waypoint) -> mission_pb2.Waypoint:
 
 def _stage_to_proto(stage: Stage) -> mission_pb2.Stage:
     """Build a proto Stage with kind and the matching payload arm set together."""
-    # Stage is NavigationStage today; the explicit check keeps a future unmapped
-    # kind a loud TypeError here instead of a mis-tagged payload on the wire.
-    if not isinstance(stage, NavigationStage):
-        raise TypeError(f"unmapped stage type: {type(stage).__name__}")
-    return mission_pb2.Stage(
-        stage_id=str(stage.stage_id),
-        kind=mission_pb2.STAGE_KIND_NAVIGATION,
-        navigation=mission_pb2.NavigationStage(
-            waypoints=[_waypoint_to_proto(w) for w in stage.waypoints]
-        ),
-        on_cancel=[_stage_to_proto(s) for s in (stage.on_cancel or [])],
-    )
+    on_cancel = [_stage_to_proto(s) for s in (stage.on_cancel or [])]
+    if isinstance(stage, NavigationStage):
+        return mission_pb2.Stage(
+            stage_id=str(stage.stage_id),
+            kind=mission_pb2.STAGE_KIND_NAVIGATION,
+            navigation=mission_pb2.NavigationStage(
+                waypoints=[_waypoint_to_proto(w) for w in stage.waypoints]
+            ),
+            on_cancel=on_cancel,
+        )
+    if isinstance(stage, CoverageStage):
+        return mission_pb2.Stage(
+            stage_id=str(stage.stage_id),
+            kind=mission_pb2.STAGE_KIND_COVERAGE,
+            coverage=mission_pb2.CoverageStage(
+                segments=[
+                    mission_pb2.Segment(
+                        kind=_SEGMENT_KIND_TO_PROTO[segment.kind],
+                        geometry=[_waypoint_to_proto(w) for w in segment.waypoints],
+                    )
+                    for segment in stage.segments
+                ],
+            ),
+            on_cancel=on_cancel,
+        )
+    # An unmapped kind must be a loud failure here rather than a mis-tagged payload on the wire.
+    raise TypeError(f"unmapped stage type: {type(stage).__name__}")
 
 
 def mission_to_proto(mission: Mission) -> mission_pb2.Mission:
@@ -113,18 +153,35 @@ def _waypoint_from_proto(waypoint: mission_pb2.Waypoint) -> WGS84Waypoint | Site
 
 def _stage_from_proto(stage: mission_pb2.Stage) -> Stage:
     """Rebuild a domain stage; reject unknown kinds and kind/payload mismatches."""
-    if stage.kind != mission_pb2.STAGE_KIND_NAVIGATION:
-        raise ValueError(f"unsupported stage kind {stage.kind} for stage {stage.stage_id}")
-    if stage.WhichOneof("payload") != "navigation":
-        raise ValueError(
-            f"stage {stage.stage_id}: kind NAVIGATION does not match payload arm "
-            f"{stage.WhichOneof('payload')!r}"
+    arm = stage.WhichOneof("payload")
+    on_cancel = [_stage_from_proto(s) for s in stage.on_cancel] or None
+    if stage.kind == mission_pb2.STAGE_KIND_NAVIGATION:
+        if arm != "navigation":
+            raise ValueError(
+                f"stage {stage.stage_id}: kind NAVIGATION does not match payload arm {arm!r}"
+            )
+        return NavigationStage(
+            stage_id=UUID(stage.stage_id),
+            waypoints=[_waypoint_from_proto(w) for w in stage.navigation.waypoints],
+            on_cancel=on_cancel,
         )
-    return NavigationStage(
-        stage_id=UUID(stage.stage_id),
-        waypoints=[_waypoint_from_proto(w) for w in stage.navigation.waypoints],
-        on_cancel=[_stage_from_proto(s) for s in stage.on_cancel] or None,
-    )
+    if stage.kind == mission_pb2.STAGE_KIND_COVERAGE:
+        if arm != "coverage":
+            raise ValueError(
+                f"stage {stage.stage_id}: kind COVERAGE does not match payload arm {arm!r}"
+            )
+        return CoverageStage(
+            stage_id=UUID(stage.stage_id),
+            segments=[
+                Segment(
+                    kind=_segment_kind_from_proto(segment.kind, stage.stage_id),
+                    waypoints=[_waypoint_from_proto(w) for w in segment.geometry],
+                )
+                for segment in stage.coverage.segments
+            ],
+            on_cancel=on_cancel,
+        )
+    raise ValueError(f"unsupported stage kind {stage.kind} for stage {stage.stage_id}")
 
 
 def mission_projection_from_proto(mission: mission_pb2.Mission) -> tuple[UUID, list[Stage]]:

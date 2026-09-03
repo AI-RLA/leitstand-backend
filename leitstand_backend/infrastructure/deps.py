@@ -22,6 +22,7 @@ from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_a
 from leitstand_backend.adapters.outbound.persistence.postgres.site_repository_adapter import (
     PostgresSiteRepositoryAdapter,
 )
+from leitstand_backend.application.coverage_planning_service import CoveragePlanningService
 from leitstand_backend.application.field_management_service import FieldManagementService
 from leitstand_backend.application.fleet_view_service import FleetViewService
 from leitstand_backend.application.mission_management_service import MissionManagementService
@@ -49,6 +50,7 @@ from leitstand_backend.infrastructure.session_scoped_tool_calls import (
     SessionScopedToolCallRepository,
 )
 from leitstand_backend.infrastructure.transactional_events import TransactionBoundEventPublisher
+from leitstand_backend.ports.inbound.coverage_planning import CoveragePlanningUseCase
 from leitstand_backend.ports.inbound.field_management import FieldManagementUseCase
 from leitstand_backend.ports.inbound.fleet_view import FleetViewUseCase
 from leitstand_backend.ports.inbound.mission_management import (
@@ -57,6 +59,7 @@ from leitstand_backend.ports.inbound.mission_management import (
 )
 from leitstand_backend.ports.inbound.site_management import SiteManagementUseCase
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
+from leitstand_backend.ports.outbound.coverage_planner import CoveragePlanner
 from leitstand_backend.ports.outbound.event_publisher import EventPublisher
 from leitstand_backend.ports.outbound.field_repository import FieldRepository
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
@@ -195,6 +198,7 @@ def get_field_management_use_case(
 
 
 def get_fleet_view_use_case(
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
     state_view: RobotStateView = Depends(get_state_view),
 ) -> FleetViewUseCase:
@@ -202,6 +206,7 @@ def get_fleet_view_use_case(
         repo=PostgresRobotRepositoryAdapter(session),
         state_view=state_view,
         missions=PostgresMissionRepositoryAdapter(session),
+        factsheets=get_factsheet_view(request),
     )
 
 
@@ -232,6 +237,7 @@ def get_mission_management_use_case(
     events: EventPublisher = Depends(get_transactional_event_publisher),
     audit: AuditWriter = Depends(get_audit_writer),
     sites: SiteRepository = Depends(get_site_repository),
+    fields: FieldRepository = Depends(get_field_repository),
 ) -> MissionManagementUseCase:
     return MissionManagementService(
         repo=repo,
@@ -240,6 +246,36 @@ def get_mission_management_use_case(
         events=events,
         audit=audit,
         sites=sites,
+        fields=fields,
+    )
+
+
+def get_coverage_planner(request: Request) -> CoveragePlanner:
+    return request.app.state.coverage_planner
+
+
+def get_coverage_planning_use_case(
+    request: Request,
+    fields: FieldRepository = Depends(get_field_repository),
+    factsheets: RobotFactsheetView = Depends(get_factsheet_view),
+    planner: CoveragePlanner = Depends(get_coverage_planner),
+    missions: MissionManagementUseCase = Depends(get_mission_management_use_case),
+    repo: MissionRepository = Depends(get_mission_repository),
+) -> CoveragePlanningUseCase:
+    """Plan coverage on the request's transaction.
+
+    The mission and its provenance are written through collaborators sharing this request's
+    session, so a plan that creates a mission always records what produced it, or neither lands.
+    """
+    settings = request.app.state.settings
+    return CoveragePlanningService(
+        fields=fields,
+        factsheets=factsheets,
+        planner=planner,
+        missions=missions,
+        repo=repo,
+        turn_sample_m=settings.coverage_turn_sample_m,
+        linear_curv_change=settings.coverage_linear_curv_change,
     )
 
 
@@ -280,6 +316,7 @@ class _DispatchOrchestrator:
                 events=TransactionBoundEventPublisher(session, self._bus),
                 audit=_make_audit_writer(session, self._current_user),
                 sites=PostgresSiteRepositoryAdapter(session),
+                fields=PostgresFieldRepositoryAdapter(session),
             )
             try:
                 mission = await service.dispatch(command)

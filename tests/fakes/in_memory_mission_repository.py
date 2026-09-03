@@ -7,6 +7,7 @@ from datetime import datetime
 from uuid import UUID
 
 from leitstand_backend.domain.errors import MissionNotFoundError
+from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
 from leitstand_backend.domain.model.mission.mission import Mission, MissionStatus
 from leitstand_backend.domain.model.mission.mission_lifecycle import is_executing, is_terminal
 from leitstand_backend.domain.model.mission.mission_state import MissionError
@@ -21,6 +22,7 @@ class InMemoryMissionRepository(MissionRepository):
         self._assignments: dict[UUID, tuple[str, datetime]] = {}
         self._stage_state: dict[tuple[UUID, UUID], StageStateRecord] = {}
         self._failure_errors: dict[UUID, list[MissionError]] = {}
+        self._coverage: dict[UUID, CoverageProvenance] = {}
         self._lock = threading.Lock()
 
     async def save(self, mission: Mission) -> Mission:
@@ -51,6 +53,14 @@ class InMemoryMissionRepository(MissionRepository):
                 and mid in self._missions
                 and not is_terminal(self._status.get(mid, MissionStatus.DRAFT))
             ]
+
+    async def executing_robot_ids(self) -> set[str]:
+        with self._lock:
+            return {
+                rid
+                for mid, (rid, _) in self._assignments.items()
+                if rid and is_executing(self._status.get(mid, MissionStatus.DRAFT))
+            }
 
     async def list_executing_by_robot(self, robot_id: str) -> list[Mission]:
         with self._lock:
@@ -131,6 +141,14 @@ class InMemoryMissionRepository(MissionRepository):
             assignment = self._assignments.get(mission_id)
             return assignment[0] if assignment else None
 
+    async def save_coverage_provenance(
+        self,
+        mission_id: UUID,
+        provenance: CoverageProvenance,
+    ) -> None:
+        with self._lock:
+            self._coverage[mission_id] = provenance
+
     async def upsert_stage_states(
         self,
         mission_id: UUID,
@@ -180,12 +198,14 @@ class InMemoryMissionRepository(MissionRepository):
             robot_id = assignment[0] if assignment else None
             dispatched_at = assignment[1] if assignment else None
             failure_errors = self._failure_errors.get(mission_id)
+            coverage = self._coverage.get(mission_id)
         return MissionRecord(
             mission=mission,
             status=status,
             robot_id=robot_id,
             dispatched_at=dispatched_at,
             failure_errors=failure_errors,
+            coverage=coverage,
         )
 
     async def get_record_for_update(self, mission_id: UUID) -> MissionRecord | None:
@@ -215,6 +235,7 @@ class InMemoryMissionRepository(MissionRepository):
                         robot_id=rid,
                         dispatched_at=dispatched_at,
                         failure_errors=self._failure_errors.get(mission.mission_id),
+                        coverage=self._coverage.get(mission.mission_id),
                     )
                 )
         return result
@@ -225,6 +246,7 @@ class InMemoryMissionRepository(MissionRepository):
             self._status.pop(mission_id, None)
             self._assignments.pop(mission_id, None)
             self._failure_errors.pop(mission_id, None)
+            self._coverage.pop(mission_id, None)
             self._drop_stage_states(mission_id)
 
     def _drop_stage_states(self, mission_id: UUID) -> None:

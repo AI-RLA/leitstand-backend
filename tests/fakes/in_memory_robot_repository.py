@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 class InMemoryRobotRepository(RobotRepository):
     def __init__(self) -> None:
         self._robots: dict[str, Robot] = {}
+        # Stored rather than discarded like telemetry, so tests can assert what was persisted.
+        self.factsheets: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     async def record_online(self, robot_id: str, metadata: Metadata) -> Robot:
@@ -60,3 +62,7 @@ class InMemoryRobotRepository(RobotRepository):
 
     async def save_telemetry(self, robot_id: str, kind: str, payload: dict) -> None:
         pass
+
+    async def save_factsheet(self, robot_id: str, payload: dict) -> None:
+        with self._lock:
+            self.factsheets[robot_id] = payload

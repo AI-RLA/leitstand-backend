@@ -13,4 +13,5 @@ def to_robot_view(overview: RobotOverview) -> RobotView:
         pose=overview.pose,
         battery=overview.battery,
         status=overview.status,
+        factsheet=overview.factsheet,
     )

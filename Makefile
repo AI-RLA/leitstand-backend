@@ -6,10 +6,14 @@ dev-install:
 	$(PYTHON) -m pip install -e ../leitstand-robot-contract
 	$(PYTHON) -m pip install -e ".[dev]"
 
-# Deps in containers, backend native for fast iteration
+# Deps in containers, backend native for fast iteration. The planner is a soft dependency, so a
+# missing or broken one costs coverage planning and not the backend, and it is rebuilt every time
+# because `up` alone would reuse an image built from older planner code.
 dev-run:
 	docker compose up -d --wait postgres zenoh-router
-	$(PYTHON) -m leitstand_backend
+	-docker compose up -d --build coverage-planner
+	LEITSTAND_COVERAGE_PLANNER_URL=$${LEITSTAND_COVERAGE_PLANNER_URL:-http://localhost:8090} \
+	    $(PYTHON) -m leitstand_backend
 
 check:
 	env PYTHONPATH= $(PYTHON) -m pytest -q
