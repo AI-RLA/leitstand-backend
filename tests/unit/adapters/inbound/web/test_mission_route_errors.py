@@ -27,6 +27,8 @@ from leitstand_backend.domain.errors import (
     RobotBusy,
     RobotFactsheetMissing,
     RobotPhysicalParametersMissing,
+    RobotRefusedControl,
+    RobotUnreachable,
     RunNotFoundError,
     StageNotInMission,
     StaleCoverageBoundary,
@@ -84,6 +86,8 @@ _STEER_CASES = [
     (RunNotFoundError(uuid4()), 404),
     (AmbiguousRun(_MISSION_ID, [uuid4(), uuid4()]), 409),
     (InvalidMissionTransition(RunStatus.SUCCEEDED, "steer"), 409),
+    (RobotUnreachable("scout", "pause"), 504),
+    (RobotRefusedControl("scout", "pause", "estop latched"), 409),
 ]
 
 # plan_coverage_mission raises a different set: the two below reach it through `replan`, which

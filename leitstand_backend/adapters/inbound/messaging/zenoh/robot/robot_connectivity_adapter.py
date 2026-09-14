@@ -152,14 +152,21 @@ class ZenohRobotConnectivityAdapter:
         if not _ROBOT_ID_RE.fullmatch(robot_id):
             logger.warning("invalid_robot_id_rejected", robot_id=robot_id)
             return
-        metadata = self._fetch_metadata(robot_id)
-        if metadata is None:
+        fetched = self._fetch_metadata(robot_id)
+        if fetched is None:
             return
-        command = RecordOnlineCommand(robot_id=robot_id, metadata=metadata)
+        metadata, active_run_id, claim_reported = fetched
+        command = RecordOnlineCommand(
+            robot_id=robot_id,
+            metadata=metadata,
+            active_run_id=active_run_id,
+            claim_reported=claim_reported,
+        )
         fut = asyncio.run_coroutine_threadsafe(self._use_case.record_online(command), self._loop)
         fut.add_done_callback(_log_future_failure("record_online", robot_id))
 
-    def _fetch_metadata(self, robot_id: str) -> Metadata | None:
+    def _fetch_metadata(self, robot_id: str) -> tuple[Metadata, str | None, bool] | None:
+        """Return the metadata, the run the robot claims (or None), and whether it said."""
         key = _METADATA_TEMPLATE.format(robot_id=robot_id)
         try:
             replies = self._session.get(key, timeout=_METADATA_QUERY_TIMEOUT_S)
@@ -172,6 +179,10 @@ class ZenohRobotConnectivityAdapter:
                 continue
             try:
                 data = json.loads(payload.decode("utf-8"))
+                claim_reported = isinstance(data, dict) and "active_run_id" in data
+                active_run_id = data.pop("active_run_id", None) if claim_reported else None
+                if active_run_id is not None and not isinstance(active_run_id, str):
+                    raise ValueError("active_run_id must be a string or null")
                 metadata = Metadata.model_validate(data)
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
                 logger.warning(
@@ -187,7 +198,7 @@ class ZenohRobotConnectivityAdapter:
                     payload_id=metadata.id,
                 )
                 continue
-            return metadata
+            return metadata, active_run_id, claim_reported
         logger.warning(
             "metadata_query_no_reply",
             robot_id=robot_id,

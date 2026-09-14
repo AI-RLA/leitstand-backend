@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from uuid import UUID
 
 from leitstand_backend.domain.model.mission.mission import Stage
-from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode, ControlRefusal
+
+
+@dataclass(frozen=True)
+class ControlReply:
+    """The robot's receipt for a pause, resume or cancel.
+
+    ``applied`` is None when no reply arrived in time. ``refusal`` and ``reason`` are set when
+    the robot answered that it did not apply the command.
+    """
+
+    applied: bool | None
+    refusal: ControlRefusal | None = None
+    reason: str | None = None
 
 
 class MissionDispatcher(ABC):
@@ -14,8 +28,8 @@ class MissionDispatcher(ABC):
 
     The robot is told the run id, never the mission's: a run is one execution, and the robot
     keys duplicate detection, cancel matching and state reports on it. Implementations own wire
-    encoding and transport. Cancel, pause and resume return nothing useful: their effect shows
-    up on the state channel.
+    encoding and transport. Cancel, pause and resume return the robot's receipt; whether the
+    command took effect shows up on the state channel.
     """
 
     @abstractmethod
@@ -32,10 +46,10 @@ class MissionDispatcher(ABC):
         run_id: UUID,
         robot_id: str,
         mode: CancelMode = CancelMode.GRACEFUL,
-    ) -> None: ...
+    ) -> ControlReply: ...
 
     @abstractmethod
-    async def pause(self, run_id: UUID, robot_id: str) -> None: ...
+    async def pause(self, run_id: UUID, robot_id: str) -> ControlReply: ...
 
     @abstractmethod
-    async def resume(self, run_id: UUID, robot_id: str) -> None: ...
+    async def resume(self, run_id: UUID, robot_id: str) -> ControlReply: ...

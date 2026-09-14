@@ -91,6 +91,13 @@ def test_terminal_status_maps() -> None:
     assert state.exec_status is MissionExecStatus.SUCCEEDED
 
 
+def test_cancelled_and_skipped_map_from_the_wire() -> None:
+    assert (
+        _STAGE_STATUS_FROM_PROTO[mission_state_pb2.STAGE_STATUS_CANCELLED] is StageStatus.CANCELLED
+    )
+    assert _STAGE_STATUS_FROM_PROTO[mission_state_pb2.STAGE_STATUS_SKIPPED] is StageStatus.SKIPPED
+
+
 def test_empty_result_map_becomes_none() -> None:
     frame = _frame()
     frame.stage_states.append(

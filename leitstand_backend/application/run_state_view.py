@@ -38,6 +38,10 @@ class StageStateView(BaseModel):
             "backend projected it because the run ended before the robot reported this stage."
         )
     )
+    parent_stage_id: UUID | None = Field(
+        default=None,
+        description="Set on a cleanup stage: the stage whose cancel started it.",
+    )
 
 
 class RunStateView(BaseModel):
@@ -78,6 +82,7 @@ def build_run_state_view(
                 result=record.result,
                 errors=errors_by_stage.get(record.stage_id, []),
                 status_source=record.status_source,
+                parent_stage_id=record.parent_stage_id,
             )
             for record in stage_states
         ],

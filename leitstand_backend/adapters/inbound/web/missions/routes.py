@@ -53,6 +53,8 @@ from leitstand_backend.domain.errors import (
     RobotBusy,
     RobotFactsheetMissing,
     RobotPhysicalParametersMissing,
+    RobotRefusedControl,
+    RobotUnreachable,
     RunNotFoundError,
     StageNotHomogeneous,
     StageNotInMission,
@@ -412,10 +414,19 @@ def _steer_errors(exc: Exception) -> HTTPException:
         return HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
     if isinstance(exc, RunNotFoundError):
         return HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
+    if isinstance(exc, RobotUnreachable):
+        return HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, str(exc))
     return HTTPException(status.HTTP_409_CONFLICT, str(exc))
 
 
-_STEER_ERRORS = (MissionNotFoundError, RunNotFoundError, InvalidMissionTransition, AmbiguousRun)
+_STEER_ERRORS = (
+    MissionNotFoundError,
+    RunNotFoundError,
+    InvalidMissionTransition,
+    AmbiguousRun,
+    RobotUnreachable,
+    RobotRefusedControl,
+)
 
 
 @router.post("/{mission_id}/cancel", response_model=MissionView, operation_id="cancel_mission")

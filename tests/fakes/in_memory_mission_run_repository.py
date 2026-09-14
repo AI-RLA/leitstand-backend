@@ -13,14 +13,21 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from leitstand_backend.domain.errors import RobotBusy
-from leitstand_backend.domain.model.mission.mission_run import MissionRun, MissionRunSummary
+from leitstand_backend.domain.model.mission.mission_run import (
+    LastReport,
+    MissionRun,
+    MissionRunSummary,
+)
 from leitstand_backend.domain.model.mission.mission_state import MissionError
 from leitstand_backend.domain.model.mission.run_lifecycle import (
+    RunTrigger,
+    actor_of,
     is_active,
     is_executing,
     is_terminal,
 )
 from leitstand_backend.domain.model.mission.run_status import RunStatus
+from leitstand_backend.domain.model.mission.run_transition import RunTransition
 from leitstand_backend.domain.model.mission.stage_state_record import StageStateRecord
 from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
 
@@ -29,6 +36,7 @@ class InMemoryMissionRunRepository(MissionRunRepository):
     def __init__(self) -> None:
         self._runs: dict[UUID, MissionRun] = {}
         self._stage_runs: dict[tuple[UUID, UUID], StageStateRecord] = {}
+        self._transitions: dict[UUID, list[RunTransition]] = {}
         self._lock = threading.Lock()
 
     async def create(self, run: MissionRun) -> MissionRun:
@@ -41,7 +49,10 @@ class InMemoryMissionRunRepository(MissionRunRepository):
 
     async def get(self, run_id: UUID) -> MissionRun | None:
         with self._lock:
-            return self._runs.get(run_id)
+            run = self._runs.get(run_id)
+            if run is None:
+                return None
+            return run.model_copy(update={"transitions": list(self._transitions.get(run_id, []))})
 
     async def get_for_update(self, run_id: UUID) -> MissionRun | None:
         return await self.get(run_id)
@@ -52,6 +63,10 @@ class InMemoryMissionRunRepository(MissionRunRepository):
         new_status: RunStatus,
         *,
         expected: RunStatus,
+        trigger: RunTrigger,
+        report_header_id: int | None = None,
+        acknowledged: bool | None = None,
+        detail: dict | None = None,
         errors: list[MissionError] | None = None,
         dispatched_at: datetime | None = None,
     ) -> MissionRun | None:
@@ -60,6 +75,19 @@ class InMemoryMissionRunRepository(MissionRunRepository):
             run = self._runs.get(run_id)
             if run is None or run.status is not expected or is_terminal(run.status):
                 return None
+            self._transitions.setdefault(run_id, []).append(
+                RunTransition(
+                    run_id=run_id,
+                    from_status=expected,
+                    to_status=new_status,
+                    trigger=trigger,
+                    at=now,
+                    actor=actor_of(trigger),
+                    report_header_id=report_header_id,
+                    acknowledged=acknowledged,
+                    detail=detail,
+                )
+            )
             patch: dict = {"status": new_status, "updated_at": now}
             if errors is not None:
                 # Stored empty, read back as absent: what the Postgres column does.
@@ -73,6 +101,21 @@ class InMemoryMissionRunRepository(MissionRunRepository):
             updated = run.model_copy(update=patch)
             self._runs[run_id] = updated
             return updated
+
+    async def set_acknowledged(
+        self, run_id: UUID, acknowledged: bool, detail: dict | None = None
+    ) -> None:
+        with self._lock:
+            rows = self._transitions.get(run_id)
+            if not rows:
+                return
+            last = rows[-1]
+            merged = {**(last.detail or {}), **(detail or {})} if (last.detail or detail) else None
+            rows[-1] = last.model_copy(update={"acknowledged": acknowledged, "detail": merged})
+
+    async def list_transitions(self, run_id: UUID) -> list[RunTransition]:
+        with self._lock:
+            return list(self._transitions.get(run_id, []))
 
     async def mark_dispatched_at(self, run_id: UUID, when: datetime) -> None:
         with self._lock:
@@ -89,11 +132,11 @@ class InMemoryMissionRunRepository(MissionRunRepository):
             self._runs[run_id] = updated
             return updated
 
-    async def touch_last_frame(self, run_id: UUID, when: datetime) -> None:
+    async def touch_last_report(self, run_id: UUID, report: LastReport) -> None:
         with self._lock:
             run = self._runs.get(run_id)
             if run is not None:
-                self._runs[run_id] = run.model_copy(update={"last_frame_at": when})
+                self._runs[run_id] = run.model_copy(update={"last_report": report})
 
     async def list_by_mission(
         self, mission_id: UUID, *, limit: int = 50, before: datetime | None = None
@@ -172,6 +215,7 @@ class InMemoryMissionRunRepository(MissionRunRepository):
     async def delete(self, run_id: UUID) -> None:
         with self._lock:
             self._runs.pop(run_id, None)
+            self._transitions.pop(run_id, None)
             self._stage_runs = {k: v for k, v in self._stage_runs.items() if k[0] != run_id}
 
     # Test-only inspection helpers

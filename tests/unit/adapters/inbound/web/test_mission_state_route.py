@@ -16,6 +16,7 @@ from leitstand_backend.domain.model.mission.mission_state import (
     ErrorSeverity,
     MissionError,
 )
+from leitstand_backend.domain.model.mission.run_lifecycle import RunTrigger
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.mission.stage_state_record import StageStateRecord
 from leitstand_backend.domain.model.mission.stage_status import StageStatus
@@ -69,7 +70,11 @@ async def _seed_failed_run(
         references=[ErrorReference(key="stage_id", value=str(stage_id))],
     )
     await runs.update_status(
-        run.run_id, RunStatus.FAILED, expected=RunStatus.RUNNING, errors=[error]
+        run.run_id,
+        RunStatus.FAILED,
+        expected=RunStatus.RUNNING,
+        trigger=RunTrigger.FAIL,
+        errors=[error],
     )
     await runs.overwrite_stage_runs(
         run.run_id,

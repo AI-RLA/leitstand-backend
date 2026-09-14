@@ -9,6 +9,7 @@ import pytest
 
 from leitstand_backend.domain.errors import RobotBusy
 from leitstand_backend.domain.model.mission.mission_run import MissionRun
+from leitstand_backend.domain.model.mission.run_lifecycle import RunTrigger
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.mission.stage_state_record import StageStateRecord
 from leitstand_backend.domain.model.mission.stage_status import StageStatus
@@ -61,18 +62,26 @@ async def test_status_is_compare_and_set_and_never_leaves_terminal() -> None:
     repo = InMemoryMissionRunRepository()
     run = await repo.create(_run())
     assert (
-        await repo.update_status(run.run_id, RunStatus.RUNNING, expected=RunStatus.PENDING)
+        await repo.update_status(
+            run.run_id, RunStatus.RUNNING, expected=RunStatus.PENDING, trigger=RunTrigger.ACK
+        )
     ) is not None
     assert (await repo.get(run.run_id)).started_at is not None
     assert (
-        await repo.update_status(run.run_id, RunStatus.SUCCEEDED, expected=RunStatus.RUNNING)
+        await repo.update_status(
+            run.run_id, RunStatus.SUCCEEDED, expected=RunStatus.RUNNING, trigger=RunTrigger.COMPLETE
+        )
     ) is not None
     assert (await repo.get(run.run_id)).ended_at is not None
     assert (
-        await repo.update_status(run.run_id, RunStatus.FAILED, expected=RunStatus.SUCCEEDED)
+        await repo.update_status(
+            run.run_id, RunStatus.FAILED, expected=RunStatus.SUCCEEDED, trigger=RunTrigger.FAIL
+        )
     ) is None
     assert (
-        await repo.update_status(run.run_id, RunStatus.FAILED, expected=RunStatus.RUNNING)
+        await repo.update_status(
+            run.run_id, RunStatus.FAILED, expected=RunStatus.RUNNING, trigger=RunTrigger.FAIL
+        )
     ) is None
     assert (await repo.get(run.run_id)).status is RunStatus.SUCCEEDED
 
@@ -85,7 +94,9 @@ async def test_one_robot_holds_one_active_run() -> None:
         await repo.create(_run(robot_id="r1"))
     assert excinfo.value.active_mission_id == first.mission_id
     # A finished run releases the robot.
-    await repo.update_status(first.run_id, RunStatus.SUCCEEDED, expected=RunStatus.PENDING)
+    await repo.update_status(
+        first.run_id, RunStatus.SUCCEEDED, expected=RunStatus.PENDING, trigger=RunTrigger.COMPLETE
+    )
     await repo.create(_run(robot_id="r1"))
 
 

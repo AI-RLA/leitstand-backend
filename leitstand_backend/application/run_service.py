@@ -20,10 +20,13 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotRefusedControl,
+    RobotUnreachable,
     RunNotFoundError,
     UnknownSite,
 )
 from leitstand_backend.domain.model.mission.mission import Stage, referenced_site_ids
+from leitstand_backend.domain.model.mission.mission_dispatch import ControlRefusal
 from leitstand_backend.domain.model.mission.mission_run import (
     MissionRun,
     RunSiteAnchor,
@@ -188,6 +191,7 @@ class RunService(RunManagementUseCase):
                 run.run_id,
                 RunStatus.DISPATCHED,
                 expected=RunStatus.PENDING,
+                trigger=RunTrigger.ACCEPT,
                 dispatched_at=command.replied_at,
             )
             if updated is not None and updated.status is RunStatus.DISPATCHED:
@@ -203,7 +207,7 @@ class RunService(RunManagementUseCase):
             # A frame or a cancel arrived before the reply; the robot has the goal either way.
             await self._runs.mark_dispatched_at(run.run_id, command.replied_at)
             current = await self._runs.get(run.run_id) or run
-            if current.status is RunStatus.CANCELLED:
+            if current.status is RunStatus.CANCELLING:
                 await self._dispatcher.cancel(run.run_id, run.robot_id)
             return current
 
@@ -223,6 +227,8 @@ class RunService(RunManagementUseCase):
                     run.run_id,
                     RunStatus.PENDING,
                     expected=RunStatus.PENDING,
+                    trigger=RunTrigger.DISPATCH_UNCONFIRMED,
+                    detail={"error_type": error_type, "reason": description},
                     errors=[
                         MissionError(
                             origin=ErrorOrigin.BACKEND,
@@ -248,7 +254,7 @@ class RunService(RunManagementUseCase):
             # path never writes a dispatch time, and a cancel that landed meanwhile must still
             # reach the robot.
             await self._runs.mark_dispatched_at(run.run_id, command.replied_at)
-            if run.status is RunStatus.CANCELLED:
+            if run.status is RunStatus.CANCELLING:
                 await self._dispatcher.cancel(run.run_id, run.robot_id)
             return await self._runs.get(run.run_id) or run
 
@@ -263,9 +269,12 @@ class RunService(RunManagementUseCase):
             type=error_type,
             description=description,
         )
-        if run.status is RunStatus.PENDING:
+        if run.status is RunStatus.CANCELLING:
+            # The operator cancelled while the dispatch was in flight and the robot never took it.
+            target = RunStatus.CANCELLED
+        if run.status in (RunStatus.PENDING, RunStatus.CANCELLING):
             updated = await self._runs.update_status(
-                run.run_id, target, expected=RunStatus.PENDING, errors=[error]
+                run.run_id, target, expected=run.status, trigger=trigger, errors=[error]
             )
             if updated is not None:
                 await self._finalize(updated, [error])
@@ -287,6 +296,7 @@ class RunService(RunManagementUseCase):
                         "robot_id": run.robot_id,
                         "error_type": error_type,
                         "reason": description,
+                        "status": target.value,
                     },
                 )
                 return updated
@@ -295,31 +305,85 @@ class RunService(RunManagementUseCase):
         return await self._runs.get(run.run_id) or run
 
     async def cancel(self, command: CancelRunCommand) -> MissionRun:
+        """Ask the robot to cancel; the run is CANCELLED only when the robot reports it.
+
+        The request is written before it is sent, so a cancel that lands while the dispatch is
+        still in flight is not lost: settle re-sends it if the goal landed after all.
+        """
         run = await self._target(command.mission_id, command.run_id)
-        target = next_state(run.status, RunTrigger.CANCEL)
-        updated = await self._runs.update_status(run.run_id, target, expected=run.status)
+        target = next_state(run.status, RunTrigger.CANCEL_REQUEST)
+        updated = await self._runs.update_status(
+            run.run_id,
+            target,
+            expected=run.status,
+            trigger=RunTrigger.CANCEL_REQUEST,
+            report_header_id=_last_header_id(run),
+            detail={"mode": command.mode.value},
+        )
         if updated is None:
             return run
-        # Sent even while PENDING: a cancel for a run the robot is not executing has no effect,
-        # and settle re-sends if the goal landed after all.
-        await self._finalize(updated, None)
-        await self._dispatcher.cancel(run.run_id, run.robot_id, command.mode)
-        emit_run_lifecycle(
-            self._events, run.mission_id, run.run_id, run.robot_id, target, RunTrigger.CANCEL
-        )
+        if run.status is not RunStatus.CANCELLING:
+            emit_run_lifecycle(
+                self._events,
+                run.mission_id,
+                run.run_id,
+                run.robot_id,
+                target,
+                RunTrigger.CANCEL_REQUEST,
+            )
         await self._audit(
-            "mission.cancel", "mission", str(run.mission_id), {"run_id": str(run.run_id)}
+            "mission.cancel",
+            "mission",
+            str(run.mission_id),
+            {"run_id": str(run.run_id), "mode": command.mode.value},
         )
+
+        reply = await self._dispatcher.cancel(run.run_id, run.robot_id, command.mode)
+        if reply.applied:
+            await self._runs.set_acknowledged(run.run_id, True)
+        elif reply.applied is None:
+            await self._runs.set_acknowledged(run.run_id, False)
+        elif (
+            reply.refusal is ControlRefusal.NOT_EXECUTING_RUN
+            and run.status is not RunStatus.PENDING
+        ):
+            # The robot does not hold this run, so there is nothing left to wait for.
+            await self._runs.set_acknowledged(run.run_id, False, {"reason": reply.reason})
+            closed = await self._runs.update_status(
+                run.run_id,
+                RunStatus.CANCELLED,
+                expected=RunStatus.CANCELLING,
+                trigger=RunTrigger.RECONCILE,
+                detail={"reason": reply.reason},
+            )
+            if closed is not None:
+                await self._finalize(closed, None)
+                emit_run_lifecycle(
+                    self._events,
+                    run.mission_id,
+                    run.run_id,
+                    run.robot_id,
+                    RunStatus.CANCELLED,
+                    RunTrigger.RECONCILE,
+                    reason=reply.reason,
+                )
+        else:
+            # A PENDING run's robot has not received the goal yet; the reply says nothing about it.
+            await self._runs.set_acknowledged(run.run_id, False, {"reason": reply.reason})
         return await self._runs.get(run.run_id) or updated
 
     async def pause(self, command: PauseRunCommand) -> MissionRun:
         return await self._steer(
-            command.mission_id, command.run_id, RunTrigger.PAUSE, "pause", "mission.pause"
+            command.mission_id, command.run_id, RunTrigger.PAUSE_REQUEST, "pause", "mission.pause"
         )
 
     async def resume(self, command: ResumeRunCommand) -> MissionRun:
         return await self._steer(
-            command.mission_id, command.run_id, RunTrigger.RESUME, "resume", "mission.resume"
+            command.mission_id,
+            command.run_id,
+            RunTrigger.RESUME_REQUEST,
+            "resume",
+            "mission.resume",
         )
 
     async def annotate(self, command: AnnotateRunCommand) -> MissionRun:
@@ -359,12 +423,28 @@ class RunService(RunManagementUseCase):
         dispatcher_action: str,
         audit_action: str,
     ) -> MissionRun:
+        """Send a pause or resume and record it only if the robot took it.
+
+        The robot's receipt decides whether anything is written: silence and refusal leave the
+        run as it was and are reported to the caller.
+        """
         run = await self._target(mission_id, run_id)
         target = next_state(run.status, trigger)
-        updated = await self._runs.update_status(run.run_id, target, expected=run.status)
+        reply = await getattr(self._dispatcher, dispatcher_action)(run.run_id, run.robot_id)
+        if reply.applied is None:
+            raise RobotUnreachable(run.robot_id, dispatcher_action)
+        if not reply.applied:
+            raise RobotRefusedControl(run.robot_id, dispatcher_action, reply.reason)
+        updated = await self._runs.update_status(
+            run.run_id,
+            target,
+            expected=run.status,
+            trigger=trigger,
+            report_header_id=_last_header_id(run),
+            acknowledged=True,
+        )
         if updated is None:
             return run
-        await getattr(self._dispatcher, dispatcher_action)(run.run_id, run.robot_id)
         emit_run_lifecycle(self._events, run.mission_id, run.run_id, run.robot_id, target, trigger)
         await self._audit(audit_action, "mission", str(run.mission_id), {"run_id": str(run.run_id)})
         return updated
@@ -400,3 +480,8 @@ class RunService(RunManagementUseCase):
 
     async def _finalize(self, run: MissionRun, failure_errors: list[MissionError] | None) -> None:
         await settle_stage_state(self._runs, self._events, run, run.status, failure_errors)
+
+
+def _last_header_id(run: MissionRun) -> int:
+    """The robot's report counter at the time of a request; later reports must exceed it."""
+    return run.last_report.header_id if run.last_report else 0

@@ -189,7 +189,7 @@ class MissionRunRow(Base):
     dispatched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    last_frame_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_report: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -224,6 +224,27 @@ class StageRunRow(Base):
     occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     status_source: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_stage_id: Mapped[UUID | None] = mapped_column(nullable=True)
+
+
+class MissionRunTransitionRow(Base):
+    """One status change of a run, appended with the change itself."""
+
+    __tablename__ = "mission_run_transitions"
+    __table_args__ = (Index("ix_run_transitions_run", "run_id", "id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("mission_runs.run_id", ondelete="CASCADE"), nullable=False
+    )
+    from_status: Mapped[str] = mapped_column(Text, nullable=False)
+    to_status: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    report_header_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    acknowledged: Mapped[bool | None] = mapped_column(nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class SiteRow(Base):

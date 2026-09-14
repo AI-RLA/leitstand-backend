@@ -11,7 +11,8 @@ from pydantic import Field as PField
 
 from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_run import RunSiteAnchor
-from leitstand_backend.domain.model.mission.mission_state import MissionError
+from leitstand_backend.domain.model.mission.mission_state import MissionError, MissionExecStatus
+from leitstand_backend.domain.model.mission.run_lifecycle import Actor, RunTrigger
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 
 
@@ -19,6 +20,37 @@ class RunOriginView(BaseModel):
     kind: Literal["manual", "agent"]
     actor: str
     tool_call_id: str | None = None
+
+
+class LastReportView(BaseModel):
+    """The most recent state report the robot sent for the run."""
+
+    received_at: datetime = PField(description="When the backend received it, by its own clock.")
+    header_id: int = PField(
+        description="The robot's report counter; later reports have higher values."
+    )
+    exec_status: MissionExecStatus
+    robot_timestamp: datetime = PField(description="When the robot sent it, by the robot's clock.")
+
+
+class RunTransitionView(BaseModel):
+    """One status change of the run, in the order they happened."""
+
+    from_status: RunStatus
+    to_status: RunStatus
+    trigger: RunTrigger
+    at: datetime
+    actor: Actor = PField(
+        description="Who caused it: the operator's request, the robot's report, or the backend."
+    )
+    acknowledged: bool | None = PField(
+        default=None,
+        description=(
+            "For an operator's request: true when the robot replied that it applied it, false "
+            "when it refused or did not answer; null while unknown or for other transitions."
+        ),
+    )
+    detail: dict | None = None
 
 
 class RunSummaryView(BaseModel):
@@ -40,8 +72,8 @@ class RunSummaryView(BaseModel):
     dispatched_at: datetime | None
     started_at: datetime | None
     ended_at: datetime | None
-    last_frame_at: datetime | None = PField(
-        description="When the robot last reported on this run, by the backend's clock."
+    last_report: LastReportView | None = PField(
+        description="The robot's most recent report on this run; null before the first one."
     )
     updated_at: datetime = PField(
         description="When the backend last changed this run: a status transition or a notes edit."
@@ -62,6 +94,10 @@ class RunView(RunSummaryView):
         ),
     )
     failure_errors: list[MissionError] | None = None
+    transitions: list[RunTransitionView] = PField(
+        default_factory=list,
+        description="The run's status changes so far, oldest first.",
+    )
 
 
 class RunNotesPatch(BaseModel):

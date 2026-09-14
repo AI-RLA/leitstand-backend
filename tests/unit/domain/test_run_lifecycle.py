@@ -10,6 +10,7 @@ from leitstand_backend.domain.model.mission.run_lifecycle import (
     EXECUTING_STATES,
     TERMINAL_STATES,
     RunTrigger,
+    actor_of,
     is_active,
     is_executing,
     is_outcome,
@@ -22,22 +23,42 @@ from leitstand_backend.domain.model.mission.run_status import RunStatus
 
 # Named here rather than derived from ALLOWED_TRANSITIONS, so that a table built by comprehension
 # is checked against something written down independently of it.
+_LIVE = (
+    RunStatus.PENDING,
+    RunStatus.DISPATCHED,
+    RunStatus.RUNNING,
+    RunStatus.PAUSED,
+    RunStatus.PAUSING,
+    RunStatus.RESUMING,
+    RunStatus.CANCELLING,
+)
+
 _EXPECTED: dict[tuple[RunStatus, RunTrigger], RunStatus] = {
     (RunStatus.PENDING, RunTrigger.ACCEPT): RunStatus.DISPATCHED,
     (RunStatus.PENDING, RunTrigger.REJECT): RunStatus.REJECTED,
+    (RunStatus.CANCELLING, RunTrigger.REJECT): RunStatus.CANCELLED,
     (RunStatus.PENDING, RunTrigger.ACK): RunStatus.RUNNING,
     (RunStatus.DISPATCHED, RunTrigger.ACK): RunStatus.RUNNING,
+    (RunStatus.RESUMING, RunTrigger.ACK): RunStatus.RUNNING,
     (RunStatus.DISPATCHED, RunTrigger.PAUSE): RunStatus.PAUSED,
     (RunStatus.RUNNING, RunTrigger.PAUSE): RunStatus.PAUSED,
+    (RunStatus.PAUSING, RunTrigger.PAUSE): RunStatus.PAUSED,
     (RunStatus.PAUSED, RunTrigger.RESUME): RunStatus.RUNNING,
+    (RunStatus.DISPATCHED, RunTrigger.PAUSE_REQUEST): RunStatus.PAUSING,
+    (RunStatus.RUNNING, RunTrigger.PAUSE_REQUEST): RunStatus.PAUSING,
+    (RunStatus.RESUMING, RunTrigger.PAUSE_REQUEST): RunStatus.PAUSING,
+    (RunStatus.PAUSED, RunTrigger.RESUME_REQUEST): RunStatus.RESUMING,
+    (RunStatus.PAUSING, RunTrigger.RESUME_REQUEST): RunStatus.RESUMING,
+    (RunStatus.CANCELLING, RunTrigger.RECONCILE): RunStatus.CANCELLED,
+    **{(state, RunTrigger.CANCEL_REQUEST): RunStatus.CANCELLING for state in _LIVE},
+    **{
+        (state, RunTrigger.RECONCILE): RunStatus.FAILED
+        for state in _LIVE
+        if state is not RunStatus.CANCELLING
+    },
     **{
         (state, trigger): expected
-        for state in (
-            RunStatus.PENDING,
-            RunStatus.DISPATCHED,
-            RunStatus.RUNNING,
-            RunStatus.PAUSED,
-        )
+        for state in _LIVE
         for trigger, expected in (
             (RunTrigger.COMPLETE, RunStatus.SUCCEEDED),
             (RunTrigger.FAIL, RunStatus.FAILED),
@@ -116,9 +137,26 @@ def test_terminal_states_cover_expected_set():
 
 
 def test_run_trigger_enum_matches_transition_table():
-    declared = set(RunTrigger)
+    """Every trigger moves a run, except the one that records an unconfirmed dispatch in place."""
+    declared = set(RunTrigger) - {RunTrigger.DISPATCH_UNCONFIRMED}
     in_table = {trigger for (_current, trigger) in ALLOWED_TRANSITIONS}
     assert declared == in_table
+
+
+@pytest.mark.parametrize(
+    ("trigger", "actor"),
+    [
+        (RunTrigger.PAUSE_REQUEST, "operator"),
+        (RunTrigger.CANCEL_REQUEST, "operator"),
+        (RunTrigger.ACK, "robot"),
+        (RunTrigger.COMPLETE, "robot"),
+        (RunTrigger.ACCEPT, "backend"),
+        (RunTrigger.RECONCILE, "backend"),
+        (RunTrigger.DISPATCH_UNCONFIRMED, "backend"),
+    ],
+)
+def test_actor_of(trigger, actor):
+    assert actor_of(trigger) == actor
 
 
 def test_the_robot_can_move_a_run_out_of_pending():
@@ -140,6 +178,9 @@ def test_a_rejection_before_the_reply_is_rejected_but_after_it_is_failed():
         (RunStatus.DISPATCHED, True, True),
         (RunStatus.RUNNING, True, True),
         (RunStatus.PAUSED, True, True),
+        (RunStatus.PAUSING, True, True),
+        (RunStatus.RESUMING, True, True),
+        (RunStatus.CANCELLING, True, True),
         (RunStatus.SUCCEEDED, False, False),
         (RunStatus.FAILED, False, False),
         (RunStatus.CANCELLED, False, False),

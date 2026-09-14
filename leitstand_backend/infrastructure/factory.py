@@ -312,12 +312,27 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
         self._reconcile_tasks: set[asyncio.Task] = set()
 
     async def record_online(self, command: RecordOnlineCommand):
+        since = datetime.now(timezone.utc)
         async with transactional_scope(self._session_factory) as s:
             repo = PostgresRobotRepositoryAdapter(s)
-            service = RobotConnectivityService(
-                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
-            )
+            events = TransactionBoundEventPublisher(s, self._bus)
+            service = RobotConnectivityService(repo=repo, events=events)
             robot = await service.record_online(command)
+            if self._mission_dispatcher is not None and command.claim_reported:
+                # The robot said which run it holds, so the others are settled here and now. A
+                # failure here is logged rather than raised: the robot is online either way.
+                try:
+                    await reconcile_robot_runs(
+                        PostgresMissionRunRepositoryAdapter(s),
+                        self._mission_dispatcher,
+                        events,
+                        command.robot_id,
+                        since,
+                        claimed_run_id=command.active_run_id,
+                        claim_reported=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("run_reconciliation_failed", robot_id=command.robot_id)
         with self._adapters_lock:
             if command.robot_id not in self._data_adapters:
                 adapter = ZenohRobotTelemetryAdapter(
@@ -332,16 +347,17 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
             asyncio.get_running_loop().run_in_executor(
                 None, self._factsheet_adapter.fetch_and_record, command.robot_id
             )
-        if self._mission_dispatcher is not None:
+        if self._mission_dispatcher is not None and not command.claim_reported:
+            # A client that does not answer the claim yet gets the grace window instead.
             task = asyncio.get_running_loop().create_task(
-                self._reconcile_when_settled(command.robot_id, datetime.now(timezone.utc))
+                self._reconcile_when_settled(command.robot_id, since)
             )
             self._reconcile_tasks.add(task)
             task.add_done_callback(self._reconcile_tasks.discard)
         return robot
 
     async def _reconcile_when_settled(self, robot_id: str, since: datetime) -> None:
-        """Give a reconnected robot time to claim its runs, then settle the ones it did not."""
+        """Give a robot without a claim time to report its runs, then settle the ones it did not."""
         try:
             await asyncio.sleep(_RECONCILE_GRACE_S)
             async with transactional_scope(self._session_factory) as s:
@@ -408,6 +424,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # The one place the running combination is written down, for a look at a partner's logs.
+        logger.info(
+            "backend_starting",
+            backend=_pkg_version("leitstand-backend"),
+            robot_contract=_pkg_version("leitstand-robot-contract"),
+        )
         engine: AsyncEngine = create_engine(settings)
         session_factory = create_session_factory(engine)
         bus = EventBus()

@@ -8,15 +8,16 @@ from uuid import uuid4
 
 import pytest
 from google.protobuf import json_format
-from leitstand.robot.v1 import mission_pb2
+from leitstand.robot.v1 import mission_pb2, robot_control_pb2
 
 from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_dispatcher_adapter import (
     ZenohMissionDispatcherAdapter,
 )
 from leitstand_backend.domain.errors import MissionDispatchTimeout, MissionRejectedByRobot
 from leitstand_backend.domain.model.mission.mission import Mission, NavigationStage
-from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode, ControlRefusal
 from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
+from leitstand_backend.ports.outbound.mission_dispatcher import ControlReply
 
 UTC_NOW = datetime(2026, 5, 27, 12, 0, 0, tzinfo=timezone.utc)
 ROBOT_ID = "scout-mini-04"
@@ -162,29 +163,69 @@ async def test_cancel_sends_payload_on_cancel_key():
     assert b'"CANCEL_MODE_IMMEDIATE"' in call.kwargs["payload"]
 
 
+def _control_json(applied: bool, refusal: int | None = None, reason: str | None = None) -> bytes:
+    resp = robot_control_pb2.ControlResponse(applied=applied)
+    if refusal is not None:
+        resp.refusal = refusal
+    if reason is not None:
+        resp.reason = reason
+    return json_format.MessageToJson(resp, preserving_proto_field_name=True).encode("utf-8")
+
+
 @pytest.mark.asyncio
-async def test_pause_puts_to_pause_key_empty_payload():
-    session = MagicMock()
+async def test_pause_queries_the_pause_key_with_the_run_id_and_reads_the_receipt():
+    session = _session_returning([_reply_with_payload(_control_json(True))])
     adapter = ZenohMissionDispatcherAdapter(session=session)
-    mission_id = uuid4()
+    run_id = uuid4()
 
-    await adapter.pause(mission_id, ROBOT_ID)
+    reply = await adapter.pause(run_id, ROBOT_ID)
 
-    session.put.assert_called_once_with(
-        f"leitstand/robot/{ROBOT_ID}/instant/pause",
-        b"",
+    call = session.get.call_args
+    assert call.args[0] == f"leitstand/robot/{ROBOT_ID}/mission/_action/pause"
+    assert str(run_id).encode() in call.kwargs["payload"]
+    assert call.kwargs["timeout"] == 3.0
+    assert reply == ControlReply(applied=True)
+
+
+@pytest.mark.asyncio
+async def test_resume_queries_the_resume_key():
+    session = _session_returning([_reply_with_payload(_control_json(True))])
+    adapter = ZenohMissionDispatcherAdapter(session=session)
+
+    await adapter.resume(uuid4(), ROBOT_ID)
+
+    assert session.get.call_args.args[0] == f"leitstand/robot/{ROBOT_ID}/mission/_action/resume"
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_read_as_the_domain_enum_never_from_the_text():
+    session = _session_returning(
+        [
+            _reply_with_payload(
+                _control_json(
+                    False, robot_control_pb2.CONTROL_REFUSAL_NOT_EXECUTING_RUN, "not executing"
+                )
+            )
+        ]
+    )
+    adapter = ZenohMissionDispatcherAdapter(session=session)
+
+    reply = await adapter.cancel(uuid4(), ROBOT_ID)
+
+    assert reply == ControlReply(
+        applied=False, refusal=ControlRefusal.NOT_EXECUTING_RUN, reason="not executing"
     )
 
 
 @pytest.mark.asyncio
-async def test_resume_puts_to_resume_key_empty_payload():
-    session = MagicMock()
-    adapter = ZenohMissionDispatcherAdapter(session=session)
-    mission_id = uuid4()
+async def test_silence_is_applied_none():
+    adapter = ZenohMissionDispatcherAdapter(session=_session_returning([]))
+    assert (await adapter.pause(uuid4(), ROBOT_ID)) == ControlReply(applied=None)
 
-    await adapter.resume(mission_id, ROBOT_ID)
 
-    session.put.assert_called_once_with(
-        f"leitstand/robot/{ROBOT_ID}/instant/resume",
-        b"",
+@pytest.mark.asyncio
+async def test_an_empty_cancel_reply_from_an_old_client_counts_as_applied():
+    adapter = ZenohMissionDispatcherAdapter(
+        session=_session_returning([_reply_with_payload(b"{}")])
     )
+    assert (await adapter.cancel(uuid4(), ROBOT_ID)) == ControlReply(applied=True)

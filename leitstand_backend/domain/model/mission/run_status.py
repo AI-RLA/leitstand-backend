@@ -9,6 +9,8 @@ class RunStatus(str, Enum):
     ``PENDING`` is the run row committed before the robot has answered the dispatch. ``REJECTED``
     is kept apart from ``FAILED`` because they mean different things for the robot: a rejection
     means it is definitely not driving, while a timeout or a mid-run failure means it may be.
+    ``PAUSING``, ``RESUMING`` and ``CANCELLING`` hold an operator's request until the robot's own
+    report confirms it.
     """
 
     PENDING = "PENDING"
@@ -19,3 +21,6 @@ class RunStatus(str, Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
+    PAUSING = "PAUSING"
+    RESUMING = "RESUMING"
+    CANCELLING = "CANCELLING"

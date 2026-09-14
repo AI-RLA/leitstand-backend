@@ -146,6 +146,37 @@ def test_put_event_queries_metadata_and_invokes_on_online(
     cmd: RecordOnlineCommand = use_case.record_online.call_args[0][0]
     assert cmd.robot_id == "r1"
     assert cmd.metadata.id == "r1"
+    assert cmd.claim_reported is False
+    assert cmd.active_run_id is None
+
+
+@patch(_RCTS_PATH)
+def test_the_run_claim_rides_the_command_not_the_metadata(
+    mock_rcts: MagicMock, session: MagicMock
+) -> None:
+    mock_rcts.return_value = MagicMock()
+    run_id = "11111111-1111-4111-8111-111111111111"
+    session.get.return_value = iter([_fake_reply(_metadata_payload("r1", active_run_id=run_id))])
+    tracker, use_case = _make_tracker(session)
+
+    tracker._handle_sample(_fake_sample("leitstand/robot/r1/online", SampleKind.PUT))
+
+    cmd: RecordOnlineCommand = use_case.record_online.call_args[0][0]
+    assert cmd.claim_reported is True
+    assert cmd.active_run_id == run_id
+    assert "active_run_id" not in cmd.metadata.model_dump()
+
+
+@patch(_RCTS_PATH)
+def test_an_explicit_null_claim_means_no_run(mock_rcts: MagicMock, session: MagicMock) -> None:
+    mock_rcts.return_value = MagicMock()
+    session.get.return_value = iter([_fake_reply(_metadata_payload("r1", active_run_id=None))])
+    tracker, use_case = _make_tracker(session)
+
+    tracker._handle_sample(_fake_sample("leitstand/robot/r1/online", SampleKind.PUT))
+
+    cmd: RecordOnlineCommand = use_case.record_online.call_args[0][0]
+    assert (cmd.claim_reported, cmd.active_run_id) == (True, None)
 
 
 @patch(_RCTS_PATH)

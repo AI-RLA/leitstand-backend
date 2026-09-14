@@ -7,8 +7,9 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from leitstand_backend.domain.model.mission.mission import Stage
-from leitstand_backend.domain.model.mission.mission_state import MissionError
+from leitstand_backend.domain.model.mission.mission_state import MissionError, MissionExecStatus
 from leitstand_backend.domain.model.mission.run_status import RunStatus
+from leitstand_backend.domain.model.mission.run_transition import RunTransition
 
 
 class RunOrigin(BaseModel):
@@ -21,6 +22,15 @@ class RunOrigin(BaseModel):
     kind: Literal["manual", "agent"]
     actor: str = Field(min_length=1)
     tool_call_id: str | None = None
+
+
+class LastReport(BaseModel):
+    """The most recent state report the robot sent for a run, as the backend received it."""
+
+    received_at: datetime
+    header_id: int = Field(ge=0)
+    exec_status: MissionExecStatus
+    robot_timestamp: datetime
 
 
 class MissionRunSummary(BaseModel):
@@ -37,7 +47,7 @@ class MissionRunSummary(BaseModel):
     dispatched_at: datetime | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
-    last_frame_at: datetime | None = None
+    last_report: LastReport | None = None
     updated_at: datetime
 
 
@@ -66,3 +76,4 @@ class MissionRun(MissionRunSummary):
     stages: list[Stage] = Field(min_length=1)
     site_anchors: dict[str, RunSiteAnchor] | None = None
     failure_errors: list[MissionError] | None = None
+    transitions: list[RunTransition] = Field(default_factory=list)

@@ -73,6 +73,13 @@ def _record(stage_id: UUID, index: int, status: S, *, started: bool = False) -> 
             [S.FINISHED, S.SKIPPED, S.SKIPPED],
         ),
         ([S.FINISHED, S.FAILED, S.FAILED], RunStatus.FAILED, [S.FINISHED, S.FAILED, S.FAILED]),
+        # What the robot itself reported as cancelled or skipped passes through unchanged.
+        (
+            [S.FINISHED, S.CANCELLED, S.SKIPPED],
+            RunStatus.CANCELLED,
+            [S.FINISHED, S.CANCELLED, S.SKIPPED],
+        ),
+        ([S.CANCELLED, S.SKIPPED], RunStatus.FAILED, [S.CANCELLED, S.SKIPPED]),
         ([None, None], RunStatus.FAILED, [S.SKIPPED, S.SKIPPED]),
         ([S.FINISHED, None, None], RunStatus.CANCELLED, [S.FINISHED, S.SKIPPED, S.SKIPPED]),
     ],

@@ -14,28 +14,31 @@ from uuid import UUID, uuid4
 import structlog
 import zenoh
 from google.protobuf import json_format
-from leitstand.robot.v1 import mission_pb2
+from leitstand.robot.v1 import mission_pb2, robot_control_pb2
 
 from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_mappers import (
     cancel_to_proto,
+    control_reply_from_proto,
+    control_request_to_proto,
     dispatch_request_to_proto,
     dispatch_response_from_proto,
 )
 from leitstand_backend.domain.errors import MissionDispatchTimeout, MissionRejectedByRobot
 from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
-from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
+from leitstand_backend.ports.outbound.mission_dispatcher import ControlReply, MissionDispatcher
 
 logger = structlog.get_logger(__name__)
 
 _DISPATCH_KEY = "leitstand/robot/{robot_id}/mission/_action/send_goal"
 _CANCEL_KEY = "leitstand/robot/{robot_id}/mission/_action/cancel_goal"
-_PAUSE_KEY = "leitstand/robot/{robot_id}/instant/pause"
-_RESUME_KEY = "leitstand/robot/{robot_id}/instant/resume"
+_PAUSE_KEY = "leitstand/robot/{robot_id}/mission/_action/pause"
+_RESUME_KEY = "leitstand/robot/{robot_id}/mission/_action/resume"
 
 _WIRE_ENCODING = "application/json;leitstand.robot.v1"
 _DISPATCH_TIMEOUT_S = 10.0
 _CANCEL_TIMEOUT_S = 5.0
+_CONTROL_TIMEOUT_S = 3.0
 
 
 def _to_json(message: Any) -> bytes:
@@ -94,23 +97,61 @@ class ZenohMissionDispatcherAdapter(MissionDispatcher):
         run_id: UUID,
         robot_id: str,
         mode: CancelMode = CancelMode.GRACEFUL,
-    ) -> None:
+    ) -> ControlReply:
         key = _CANCEL_KEY.format(robot_id=robot_id)
         payload = _to_json(cancel_to_proto(run_id, mode))
         logger.info(
             "mission_cancel_sending", run_id=str(run_id), robot_id=robot_id, mode=mode.value
         )
-        await _get(self._session, key, payload, _CANCEL_TIMEOUT_S)
+        return await self._control(key, payload, _CANCEL_TIMEOUT_S, run_id, robot_id, "cancel")
 
-    async def pause(self, run_id: UUID, robot_id: str) -> None:
+    async def pause(self, run_id: UUID, robot_id: str) -> ControlReply:
         key = _PAUSE_KEY.format(robot_id=robot_id)
+        payload = _to_json(control_request_to_proto(run_id))
         logger.info("mission_pause_sending", run_id=str(run_id), robot_id=robot_id)
-        await _put(self._session, key)
+        return await self._control(key, payload, _CONTROL_TIMEOUT_S, run_id, robot_id, "pause")
 
-    async def resume(self, run_id: UUID, robot_id: str) -> None:
+    async def resume(self, run_id: UUID, robot_id: str) -> ControlReply:
         key = _RESUME_KEY.format(robot_id=robot_id)
+        payload = _to_json(control_request_to_proto(run_id))
         logger.info("mission_resume_sending", run_id=str(run_id), robot_id=robot_id)
-        await _put(self._session, key)
+        return await self._control(key, payload, _CONTROL_TIMEOUT_S, run_id, robot_id, "resume")
+
+    async def _control(
+        self,
+        key: str,
+        payload: bytes,
+        timeout: float,
+        run_id: UUID,
+        robot_id: str,
+        command: str,
+    ) -> ControlReply:
+        """Send a command and read the robot's receipt; silence is ``applied=None``."""
+        replies = await _get(self._session, key, payload, timeout)
+        for reply in replies:
+            body = _reply_payload_bytes(reply)
+            if body is None:
+                continue
+            # A 0.3.0 client answers a cancel with an empty payload, which means applied.
+            if body.strip() in (b"", b"{}"):
+                return ControlReply(applied=True)
+            try:
+                response = json_format.Parse(
+                    body, robot_control_pb2.ControlResponse(), ignore_unknown_fields=False
+                )
+            except json_format.ParseError as exc:
+                logger.warning(
+                    "control_invalid_reply",
+                    command=command,
+                    run_id=str(run_id),
+                    robot_id=robot_id,
+                    error=str(exc),
+                )
+                continue
+            applied, refusal, reason = control_reply_from_proto(response)
+            return ControlReply(applied=applied, refusal=refusal, reason=reason)
+        logger.warning("control_no_reply", command=command, run_id=str(run_id), robot_id=robot_id)
+        return ControlReply(applied=None)
 
 
 async def _get(
@@ -125,12 +166,6 @@ async def _get(
         None,
         lambda: list(session.get(key, payload=payload, encoding=_WIRE_ENCODING, timeout=timeout)),
     )
-
-
-async def _put(session: zenoh.Session, key: str) -> None:
-    """Run session.put() in the default thread pool (empty instant-action signal)."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: session.put(key, b""))
 
 
 def _reply_payload_bytes(reply: Any) -> bytes | None:

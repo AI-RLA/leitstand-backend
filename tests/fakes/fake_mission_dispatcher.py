@@ -8,7 +8,7 @@ from uuid import UUID
 
 from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
-from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
+from leitstand_backend.ports.outbound.mission_dispatcher import ControlReply, MissionDispatcher
 
 
 class FakeMissionDispatcher(MissionDispatcher):
@@ -27,6 +27,12 @@ class FakeMissionDispatcher(MissionDispatcher):
         self.resumed: list[tuple[UUID, str]] = []
         self.gate: asyncio.Event | None = None
         self._dispatch_handler: Callable[[UUID, list[Stage], str], Awaitable[None]] | None = None
+        # The robot's receipt per command; tests set a refusal or silence (applied=None) here.
+        self.replies: dict[str, ControlReply] = {
+            "cancel": ControlReply(applied=True),
+            "pause": ControlReply(applied=True),
+            "resume": ControlReply(applied=True),
+        }
 
     def set_dispatch_handler(
         self,
@@ -46,11 +52,14 @@ class FakeMissionDispatcher(MissionDispatcher):
         run_id: UUID,
         robot_id: str,
         mode: CancelMode = CancelMode.GRACEFUL,
-    ) -> None:
+    ) -> ControlReply:
         self.cancelled.append((run_id, robot_id, mode))
+        return self.replies["cancel"]
 
-    async def pause(self, run_id: UUID, robot_id: str) -> None:
+    async def pause(self, run_id: UUID, robot_id: str) -> ControlReply:
         self.paused.append((run_id, robot_id))
+        return self.replies["pause"]
 
-    async def resume(self, run_id: UUID, robot_id: str) -> None:
+    async def resume(self, run_id: UUID, robot_id: str) -> ControlReply:
         self.resumed.append((run_id, robot_id))
+        return self.replies["resume"]

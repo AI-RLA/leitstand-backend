@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
+from uuid import UUID
 
 from leitstand_backend.application.mission_events import emit_run_lifecycle
 from leitstand_backend.application.run_state_view import (
@@ -9,6 +10,7 @@ from leitstand_backend.application.run_state_view import (
     settle_stage_state,
 )
 from leitstand_backend.domain.model.mission.mission import Stage
+from leitstand_backend.domain.model.mission.mission_run import LastReport, MissionRun
 from leitstand_backend.domain.model.mission.mission_state import (
     MissionError,
     MissionStateMessage,
@@ -42,12 +44,18 @@ def _live_records(state: MissionStateMessage, stages: list[Stage]) -> list[Stage
     ``stage_index`` comes from the stage's position in the run's snapshot, not the frame's
     order, so a partial frame cannot shift it; a reported stage absent from the plan is ignored.
     """
-    index_by_id = {stage.stage_id: index for index, stage in enumerate(stages)}
+    # A cleanup stage is indexed under its parent, so it sorts with the stage it belongs to.
+    index_by_id: dict[UUID, tuple[int, UUID | None]] = {}
+    for index, stage in enumerate(stages):
+        index_by_id[stage.stage_id] = (index, None)
+        for child in stage.on_cancel or []:
+            index_by_id[child.stage_id] = (index, stage.stage_id)
     records: list[StageStateRecord] = []
     for stage_state in state.stage_states:
-        index = index_by_id.get(stage_state.stage_id)
-        if index is None:
+        found = index_by_id.get(stage_state.stage_id)
+        if found is None:
             continue
+        index, parent_stage_id = found
         records.append(
             StageStateRecord(
                 stage_id=stage_state.stage_id,
@@ -59,9 +67,22 @@ def _live_records(state: MissionStateMessage, stages: list[Stage]) -> list[Stage
                 ended_at=stage_state.ended_at,
                 result=stage_state.result,
                 source_ts=state.timestamp,
+                parent_stage_id=parent_stage_id,
             )
         )
     return records
+
+
+def _predates_request(run: MissionRun, header_id: int, trigger: RunTrigger) -> bool:
+    """True when a report could not yet reflect the operator's pending pause or resume."""
+    if run.status not in (RunStatus.PAUSING, RunStatus.RESUMING):
+        return False
+    if trigger not in (RunTrigger.PAUSE, RunTrigger.ACK):
+        return False
+    request = run.transitions[-1] if run.transitions else None
+    if request is None or request.report_header_id is None:
+        return False
+    return header_id <= request.report_header_id
 
 
 class MissionStateService(MissionStateUseCase):
@@ -99,13 +120,33 @@ class MissionStateService(MissionStateUseCase):
             return
 
         now = datetime.now(timezone.utc)
-        await self._runs.touch_last_frame(run.run_id, now)
+        if not is_terminal(run.status):
+            # A report after the end must not keep the run's report age ticking.
+            await self._runs.touch_last_report(
+                run.run_id,
+                LastReport(
+                    received_at=now,
+                    header_id=state.header_id,
+                    exec_status=state.exec_status,
+                    robot_timestamp=state.timestamp,
+                ),
+            )
         live = _live_records(state, run.stages)
 
         current_status = run.status
         transition: tuple[RunStatus, RunTrigger] | None = None
         failure_errors: list[MissionError] | None = None
         trigger = trigger_for_report(current_status, state.exec_status)
+        if trigger is not None and _predates_request(run, state.header_id, trigger):
+            # The robot reported this before it received the operator's request; it does not
+            # confirm anything.
+            logger.debug(
+                "run %s: %s report %d predates the request; ignored",
+                run.run_id,
+                state.exec_status.name,
+                state.header_id,
+            )
+            trigger = None
         target = try_next_state(current_status, trigger) if trigger is not None else None
         if target is None and is_terminal(current_status) and not is_outcome(state.exec_status):
             # The robot is still working a run the backend has closed: the only dropped frame
@@ -127,7 +168,12 @@ class MissionStateService(MissionStateUseCase):
             )
             if (
                 await self._runs.update_status(
-                    run.run_id, target, expected=current_status, errors=failure_errors
+                    run.run_id,
+                    target,
+                    expected=current_status,
+                    trigger=trigger,
+                    report_header_id=state.header_id,
+                    errors=failure_errors,
                 )
                 is not None
             ):

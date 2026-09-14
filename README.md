@@ -82,11 +82,11 @@ each registered robot (`<id>` is the robot's slug) it consumes:
 | `leitstand/robot/<id>/battery` | publication | battery telemetry |
 | `leitstand/robot/<id>/factsheet` | queryable | capability declaration |
 | `leitstand/robot/<id>/mission/_action/send_goal`, `.../cancel_goal` | queryable | dispatch, cancel |
-| `leitstand/robot/<id>/instant/pause`, `.../resume` | publication | pause, resume |
+| `leitstand/robot/<id>/mission/_action/pause`, `.../resume` | queryable | pause, resume |
 | `leitstand/robot/<id>/mission/state` | publication | execution state |
 
 All payloads except `metadata` are the proto messages of `leitstand-robot-contract`; the robot
-side is `leitstand-robot-client`.
+side is `leitstand-robot-client-template`.
 
 ## HTTP REST API
 

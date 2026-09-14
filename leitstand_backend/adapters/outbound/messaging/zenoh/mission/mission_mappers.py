@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from uuid import UUID
 
-from leitstand.robot.v1 import mission_pb2
+from leitstand.robot.v1 import mission_pb2, robot_control_pb2
 
 from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
 from leitstand_backend.domain.model.mission.mission import (
@@ -22,7 +22,7 @@ from leitstand_backend.domain.model.mission.mission import (
     Segment,
     Stage,
 )
-from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode, ControlRefusal
 from leitstand_backend.domain.model.mission.waypoint import (
     SiteLocalWaypoint,
     Waypoint,
@@ -32,6 +32,12 @@ from leitstand_backend.domain.model.mission.waypoint import (
 _CANCEL_MODE_TO_PROTO: dict[CancelMode, mission_pb2.CancelMode] = {
     CancelMode.GRACEFUL: mission_pb2.CANCEL_MODE_GRACEFUL,
     CancelMode.IMMEDIATE: mission_pb2.CANCEL_MODE_IMMEDIATE,
+}
+
+_CONTROL_REFUSAL_FROM_PROTO: dict[int, ControlRefusal] = {
+    robot_control_pb2.CONTROL_REFUSAL_UNSPECIFIED: ControlRefusal.UNSPECIFIED,
+    robot_control_pb2.CONTROL_REFUSAL_NOT_EXECUTING_RUN: ControlRefusal.NOT_EXECUTING_RUN,
+    robot_control_pb2.CONTROL_REFUSAL_OTHER: ControlRefusal.OTHER,
 }
 
 
@@ -130,6 +136,23 @@ def dispatch_response_from_proto(
 def cancel_to_proto(run_id: UUID, mode: CancelMode) -> mission_pb2.CancelRequest:
     """Build the cancel envelope for one run."""
     return mission_pb2.CancelRequest(run_id=str(run_id), mode=_CANCEL_MODE_TO_PROTO[mode])
+
+
+def control_request_to_proto(run_id: UUID) -> robot_control_pb2.ControlRequest:
+    """Build a pause or resume request for one run."""
+    return robot_control_pb2.ControlRequest(run_id=str(run_id))
+
+
+def control_reply_from_proto(
+    response: robot_control_pb2.ControlResponse,
+) -> tuple[bool, ControlRefusal | None, str | None]:
+    """Read a control reply: applied, the structured refusal, the free-text reason."""
+    if response.applied:
+        return True, None, None
+    reason = response.reason if response.HasField("reason") else None
+    # A value this code does not know is treated as an unspecified refusal, never as applied.
+    refusal = _CONTROL_REFUSAL_FROM_PROTO.get(response.refusal, ControlRefusal.UNSPECIFIED)
+    return False, refusal, reason
 
 
 def _waypoint_from_proto(waypoint: mission_pb2.Waypoint) -> WGS84Waypoint | SiteLocalWaypoint:

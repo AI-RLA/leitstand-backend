@@ -39,10 +39,15 @@ class StageStateRecord(BaseModel):
     result: dict[str, str] | None = None
     source_ts: datetime
     status_source: StatusSource = "robot"
+    # Set on a cleanup stage's record: the stage whose cancel started it.
+    parent_stage_id: UUID | None = None
 
 
 def _project_status(status: StageStatus, run_status: RunStatus) -> StageStatus:
     """Project one stage's live status onto its final status given the run's outcome."""
+    if status in (StageStatus.CANCELLED, StageStatus.SKIPPED):
+        # The robot said so itself; nothing to project.
+        return status
     if run_status is RunStatus.SUCCEEDED:
         return StageStatus.FINISHED
     # The run ended on FAILED, CANCELLED or REJECTED.
@@ -86,7 +91,8 @@ def final_stage_statuses(
     The stage definitions are the spine: each is matched to its live record by ``stage_id``
     (WAITING when none was reported) and projected by :func:`_project_status`, so the result
     is complete however much the robot reported. A never-started stage keeps ``ended_at = None``,
-    so it shows no duration.
+    so it shows no duration. Cleanup stages the robot reported are kept as reported, after their
+    parent; nothing is projected for cleanup the robot never ran.
     """
     resolved: list[StageStateRecord] = []
     for index, stage in enumerate(stages):
@@ -115,6 +121,9 @@ def final_stage_statuses(
                 source_ts=now,
                 status_source=source,
             )
+        )
+        resolved.extend(
+            record for record in live_by_id.values() if record.parent_stage_id == stage.stage_id
         )
     return resolved
 

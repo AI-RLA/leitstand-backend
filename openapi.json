@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leitstand API",
-    "version": "0.5.0"
+    "version": "0.6.0"
   },
   "paths": {
     "/healthz": {
@@ -2114,6 +2114,39 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "LastReportView": {
+        "properties": {
+          "received_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Received At",
+            "description": "When the backend received it, by its own clock."
+          },
+          "header_id": {
+            "type": "integer",
+            "title": "Header Id",
+            "description": "The robot's report counter; later reports have higher values."
+          },
+          "exec_status": {
+            "$ref": "#/components/schemas/MissionExecStatus"
+          },
+          "robot_timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Robot Timestamp",
+            "description": "When the robot sent it, by the robot's clock."
+          }
+        },
+        "type": "object",
+        "required": [
+          "received_at",
+          "header_id",
+          "exec_status",
+          "robot_timestamp"
+        ],
+        "title": "LastReportView",
+        "description": "The most recent state report the robot sent for the run."
+      },
       "Metadata": {
         "properties": {
           "id": {
@@ -2358,6 +2391,18 @@
         ],
         "title": "MissionError",
         "description": "A structured error report attached to a stage or mission.\n\n``origin`` says whether the robot reported it or the backend authored it."
+      },
+      "MissionExecStatus": {
+        "type": "string",
+        "enum": [
+          "RUNNING",
+          "PAUSED",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "title": "MissionExecStatus",
+        "description": "The robot's execution status: live (RUNNING/PAUSED) or terminal.\n\nExecution truth, not the mission lifecycle status (which the backend owns and\nderives from this). SUCCEEDED, FAILED, and CANCELLED are terminal."
       },
       "MissionUpdate": {
         "properties": {
@@ -3172,10 +3217,13 @@
           "SUCCEEDED",
           "FAILED",
           "CANCELLED",
-          "REJECTED"
+          "REJECTED",
+          "PAUSING",
+          "RESUMING",
+          "CANCELLING"
         ],
         "title": "RunStatus",
-        "description": "Lifecycle state of a MissionRun, owned by the backend.\n\n``PENDING`` is the run row committed before the robot has answered the dispatch. ``REJECTED``\nis kept apart from ``FAILED`` because they mean different things for the robot: a rejection\nmeans it is definitely not driving, while a timeout or a mid-run failure means it may be."
+        "description": "Lifecycle state of a MissionRun, owned by the backend.\n\n``PENDING`` is the run row committed before the robot has answered the dispatch. ``REJECTED``\nis kept apart from ``FAILED`` because they mean different things for the robot: a rejection\nmeans it is definitely not driving, while a timeout or a mid-run failure means it may be.\n``PAUSING``, ``RESUMING`` and ``CANCELLING`` hold an operator's request until the robot's own\nreport confirms it."
       },
       "RunSummaryView": {
         "properties": {
@@ -3256,18 +3304,16 @@
             ],
             "title": "Ended At"
           },
-          "last_frame_at": {
+          "last_report": {
             "anyOf": [
               {
-                "type": "string",
-                "format": "date-time"
+                "$ref": "#/components/schemas/LastReportView"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Last Frame At",
-            "description": "When the robot last reported on this run, by the backend's clock."
+            "description": "The robot's most recent report on this run; null before the first one."
           },
           "updated_at": {
             "type": "string",
@@ -3289,11 +3335,94 @@
           "dispatched_at",
           "started_at",
           "ended_at",
-          "last_frame_at",
+          "last_report",
           "updated_at"
         ],
         "title": "RunSummaryView",
         "description": "A run without its stages: what a list shows, and what a mission carries as ``latest_run``."
+      },
+      "RunTransitionView": {
+        "properties": {
+          "from_status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "to_status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/RunTrigger"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "At"
+          },
+          "actor": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "robot",
+              "backend"
+            ],
+            "title": "Actor",
+            "description": "Who caused it: the operator's request, the robot's report, or the backend."
+          },
+          "acknowledged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acknowledged",
+            "description": "For an operator's request: true when the robot replied that it applied it, false when it refused or did not answer; null while unknown or for other transitions."
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "from_status",
+          "to_status",
+          "trigger",
+          "at",
+          "actor"
+        ],
+        "title": "RunTransitionView",
+        "description": "One status change of the run, in the order they happened."
+      },
+      "RunTrigger": {
+        "type": "string",
+        "enum": [
+          "accept",
+          "reject",
+          "timeout",
+          "dispatch_unconfirmed",
+          "reconcile",
+          "pause_request",
+          "resume_request",
+          "cancel_request",
+          "ack",
+          "pause",
+          "resume",
+          "complete",
+          "fail",
+          "cancel"
+        ],
+        "title": "RunTrigger",
+        "description": "A lifecycle transition trigger: the named cause of a status change.\n\nThe ``*_REQUEST`` triggers are the operator asking; ``PAUSE``, ``RESUME``, ``ACK``,\n``COMPLETE``, ``FAIL`` and ``CANCEL`` are the robot reporting; the rest are the backend\nsettling a reply, a silence or a robot that came back without the run."
       },
       "RunView": {
         "properties": {
@@ -3374,18 +3503,16 @@
             ],
             "title": "Ended At"
           },
-          "last_frame_at": {
+          "last_report": {
             "anyOf": [
               {
-                "type": "string",
-                "format": "date-time"
+                "$ref": "#/components/schemas/LastReportView"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Last Frame At",
-            "description": "When the robot last reported on this run, by the backend's clock."
+            "description": "The robot's most recent report on this run; null before the first one."
           },
           "updated_at": {
             "type": "string",
@@ -3442,6 +3569,14 @@
               }
             ],
             "title": "Failure Errors"
+          },
+          "transitions": {
+            "items": {
+              "$ref": "#/components/schemas/RunTransitionView"
+            },
+            "type": "array",
+            "title": "Transitions",
+            "description": "The run's status changes so far, oldest first."
           }
         },
         "type": "object",
@@ -3457,7 +3592,7 @@
           "dispatched_at",
           "started_at",
           "ended_at",
-          "last_frame_at",
+          "last_report",
           "updated_at",
           "stages"
         ],
@@ -3848,6 +3983,19 @@
             ],
             "title": "Status Source",
             "description": "Who established the status: 'robot' when the robot reported it, 'backend' when the backend projected it because the run ended before the robot reported this stage."
+          },
+          "parent_stage_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Stage Id",
+            "description": "Set on a cleanup stage: the stage whose cancel started it."
           }
         },
         "type": "object",
@@ -3878,7 +4026,7 @@
           "SKIPPED"
         ],
         "title": "StageStatus",
-        "description": "Canonical per-stage status, covering both robot-reported and backend-resolved values.\n\nThe robot reports ``WAITING`` through ``FAILED`` on the wire. ``CANCELLED`` and\n``SKIPPED`` are backend-only: the robot cannot express them (it reports a cancelled\ngoal as ``FAILED`` and never reports a stage it did not reach), so the backend assigns\nthem when it resolves the final per-stage view at the terminal mission transition.\nInbound frames carry only the wire values; the anti-corruption mapper rejects any other."
+        "description": "Canonical per-stage status, covering both robot-reported and backend-resolved values.\n\nA robot reports the stage a cancel interrupted as ``CANCELLED`` and the stages it never\nstarted as ``SKIPPED``; the backend assigns the same two when it closes a run the robot did\nnot report to the end."
       },
       "User": {
         "properties": {

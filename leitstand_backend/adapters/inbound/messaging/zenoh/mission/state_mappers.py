@@ -40,6 +40,8 @@ _STAGE_STATUS_FROM_PROTO: dict[int, StageStatus] = {
     mission_state_pb2.STAGE_STATUS_PAUSED: StageStatus.PAUSED,
     mission_state_pb2.STAGE_STATUS_FINISHED: StageStatus.FINISHED,
     mission_state_pb2.STAGE_STATUS_FAILED: StageStatus.FAILED,
+    mission_state_pb2.STAGE_STATUS_CANCELLED: StageStatus.CANCELLED,
+    mission_state_pb2.STAGE_STATUS_SKIPPED: StageStatus.SKIPPED,
 }
 
 _SEVERITY_FROM_PROTO: dict[int, ErrorSeverity] = {

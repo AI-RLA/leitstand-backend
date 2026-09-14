@@ -200,7 +200,7 @@ async def test_stage_rows_are_keyed_by_run_and_ordered_by_header():
     )
     (row,) = await runs.get_stage_runs(run.run_id)
     assert row.status is StageStatus.RUNNING and row.progress == 0.5
-    assert (await runs.get(run.run_id)).last_frame_at is not None
+    assert (await runs.get(run.run_id)).last_report.header_id == 4
 
 
 @pytest.mark.asyncio
@@ -238,3 +238,43 @@ async def test_handle_robot_offline_leaves_every_run_as_it_found_it():
     assert (await runs.get(done.run_id)).status is RunStatus.SUCCEEDED
     assert (await runs.get(executing.run_id)).failure_errors is None
     assert [p for t, p, _ in events.published if t.endswith("/lifecycle")] == []
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_stage_the_robot_reports_is_kept_under_its_parent():
+    """A cleanup stage sorts with the stage whose cancel started it, and survives the closing."""
+    from leitstand_backend.domain.model.mission.mission import NavigationStage
+    from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
+
+    svc, runs, _events = _make_svc()
+    cleanup = NavigationStage(stage_id=uuid4(), waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)])
+    main = NavigationStage(
+        stage_id=uuid4(), waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)], on_cancel=[cleanup]
+    )
+    run = await runs.create(_run(RunStatus.RUNNING).model_copy(update={"stages": [main]}))
+
+    await svc.record(
+        RecordMissionStateCommand(
+            robot_id=ROBOT_ID,
+            state=_state_for(
+                run.run_id,
+                exec_status=MissionExecStatus.CANCELLED,
+                header_id=3,
+                stage_states=[
+                    StageState(stage_id=main.stage_id, status=StageStatus.CANCELLED),
+                    StageState(stage_id=cleanup.stage_id, status=StageStatus.FINISHED),
+                ],
+            ),
+        )
+    )
+
+    rows = {r.stage_id: r for r in await runs.get_stage_runs(run.run_id)}
+    assert rows[main.stage_id].status is StageStatus.CANCELLED
+    assert rows[main.stage_id].status_source == "robot"
+    child = rows[cleanup.stage_id]
+    assert (child.stage_index, child.parent_stage_id, child.status) == (
+        0,
+        main.stage_id,
+        StageStatus.FINISHED,
+    )
+    assert (await runs.get(run.run_id)).status is RunStatus.CANCELLED

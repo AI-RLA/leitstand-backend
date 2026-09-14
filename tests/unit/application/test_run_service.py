@@ -26,16 +26,19 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotRefusedControl,
+    RobotUnreachable,
     RunNotFoundError,
     UnsupportedStageKind,
 )
-from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode, ControlRefusal
 from leitstand_backend.domain.model.mission.mission_run import MissionRun, RunOrigin
 from leitstand_backend.domain.model.mission.mission_state import (
     ErrorSeverity,
     MissionExecStatus,
     MissionStateMessage,
 )
+from leitstand_backend.domain.model.mission.run_lifecycle import RunTrigger
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.mission.stages_digest import stages_digest
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
@@ -64,6 +67,7 @@ from leitstand_backend.ports.inbound.run_management import (
     StartRunCommand,
 )
 from leitstand_backend.ports.outbound.event_publisher import mission_topic
+from leitstand_backend.ports.outbound.mission_dispatcher import ControlReply
 from tests.fakes.fake_mission_dispatcher import FakeMissionDispatcher
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_field_repository import InMemoryFieldRepository
@@ -472,7 +476,7 @@ async def test_cancel_with_two_active_runs_needs_a_run_id():
 
     await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id, run_id=b.run_id))
 
-    assert (await w.runs.get(b.run_id)).status is RunStatus.CANCELLED
+    assert (await w.runs.get(b.run_id)).status is RunStatus.CANCELLING
     assert (await w.runs.get(a.run_id)).status is RunStatus.DISPATCHED
     assert w.dispatcher.cancelled[-1][:2] == (b.run_id, ROBOT_B)
 
@@ -521,8 +525,10 @@ async def test_cancel_during_pending_commands_the_robot():
     w.dispatcher.gate.set()
     settled = await started
 
-    assert settled.status is RunStatus.CANCELLED
-    assert (await w.runs.get(pending.run_id)).status is RunStatus.CANCELLED
+    # The robot accepted the goal after the cancel was written, so the cancel is sent again and
+    # the run stays CANCELLING until the robot reports the end.
+    assert settled.status is RunStatus.CANCELLING
+    assert (await w.runs.get(pending.run_id)).status is RunStatus.CANCELLING
     assert [c[0] for c in w.dispatcher.cancelled] == [pending.run_id, pending.run_id]
     assert "RUNNING" not in [e["status"] for e in w.lifecycle()]
 
@@ -543,7 +549,7 @@ async def test_a_cancel_that_landed_mid_dispatch_is_resent_when_the_reply_times_
         SettleRunCommand(run_id=run.run_id, outcome=DispatchOutcome.TIMEOUT, replied_at=UTC_NOW)
     )
 
-    assert settled.status is RunStatus.CANCELLED
+    assert settled.status is RunStatus.CANCELLING
     assert [c[:2] for c in w.dispatcher.cancelled] == [(run.run_id, ROBOT_A)]
 
 
@@ -717,8 +723,20 @@ async def test_cancel_running_calls_dispatcher_and_resolves_stages():
 
     await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
 
-    assert (await w.runs.get(run.run_id)).status is RunStatus.CANCELLED
+    cancelling = await w.runs.get(run.run_id)
+    assert cancelling.status is RunStatus.CANCELLING
     assert w.dispatcher.cancelled[-1][:2] == (run.run_id, ROBOT_A)
+    request = cancelling.transitions[-1]
+    assert request.trigger is RunTrigger.CANCEL_REQUEST
+    assert request.actor == "operator"
+    assert request.acknowledged is True
+    assert request.report_header_id == 1
+
+    await w.robot_reports(run, MissionExecStatus.CANCELLED, header_id=2)
+
+    cancelled = await w.runs.get(run.run_id)
+    assert cancelled.status is RunStatus.CANCELLED
+    assert cancelled.transitions[-1].actor == "robot"
     # The stage never reported anything but WAITING, so it resolves to SKIPPED.
     assert w.latched_state()["stage_states"][0]["status"] == "SKIPPED"
 
@@ -731,12 +749,156 @@ async def test_pause_and_resume_call_the_dispatcher():
     await w.robot_reports(run, MissionExecStatus.RUNNING)
 
     await w.run_service.pause(PauseRunCommand(mission_id=mission.mission_id))
-    assert (await w.runs.get(run.run_id)).status is RunStatus.PAUSED
+    pausing = await w.runs.get(run.run_id)
+    assert pausing.status is RunStatus.PAUSING
     assert w.dispatcher.paused == [(run.run_id, ROBOT_A)]
+    assert pausing.transitions[-1].acknowledged is True
+
+    # A PAUSED report that predates the request does not confirm it.
+    await w.robot_reports(run, MissionExecStatus.PAUSED, header_id=1)
+    assert (await w.runs.get(run.run_id)).status is RunStatus.PAUSING
+    await w.robot_reports(run, MissionExecStatus.PAUSED, header_id=2)
+    assert (await w.runs.get(run.run_id)).status is RunStatus.PAUSED
 
     await w.run_service.resume(ResumeRunCommand(mission_id=mission.mission_id))
-    assert (await w.runs.get(run.run_id)).status is RunStatus.RUNNING
+    assert (await w.runs.get(run.run_id)).status is RunStatus.RESUMING
     assert w.dispatcher.resumed == [(run.run_id, ROBOT_A)]
+    await w.robot_reports(run, MissionExecStatus.RUNNING, header_id=3)
+    assert (await w.runs.get(run.run_id)).status is RunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_pause_the_robot_does_not_answer_writes_nothing():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+    w.dispatcher.replies["pause"] = ControlReply(applied=None)
+
+    with pytest.raises(RobotUnreachable):
+        await w.run_service.pause(PauseRunCommand(mission_id=mission.mission_id))
+
+    after = await w.runs.get(run.run_id)
+    assert after.status is RunStatus.RUNNING
+    assert all(t.trigger is not RunTrigger.PAUSE_REQUEST for t in after.transitions)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_pause_writes_nothing_and_names_the_reason():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+    w.dispatcher.replies["pause"] = ControlReply(
+        applied=False, refusal=ControlRefusal.OTHER, reason="estop latched"
+    )
+
+    with pytest.raises(RobotRefusedControl, match="estop latched"):
+        await w.run_service.pause(PauseRunCommand(mission_id=mission.mission_id))
+    assert (await w.runs.get(run.run_id)).status is RunStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_the_robot_does_not_answer_stays_cancelling_unacknowledged():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+    w.dispatcher.replies["cancel"] = ControlReply(applied=None)
+
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+
+    after = await w.runs.get(run.run_id)
+    assert after.status is RunStatus.CANCELLING
+    assert after.transitions[-1].acknowledged is False
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_refused_as_not_executing_closes_the_run():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+    w.dispatcher.replies["cancel"] = ControlReply(
+        applied=False, refusal=ControlRefusal.NOT_EXECUTING_RUN, reason="not executing this run"
+    )
+
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+
+    after = await w.runs.get(run.run_id)
+    assert after.status is RunStatus.CANCELLED
+    assert after.transitions[-1].trigger is RunTrigger.RECONCILE
+    assert after.transitions[-1].actor == "backend"
+    assert w.latched_state()["stage_states"][0]["status"] == "SKIPPED"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_refused_for_another_reason_stays_cancelling():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+    w.dispatcher.replies["cancel"] = ControlReply(
+        applied=False, refusal=ControlRefusal.OTHER, reason="estop latched"
+    )
+
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+
+    after = await w.runs.get(run.run_id)
+    assert after.status is RunStatus.CANCELLING
+    assert after.transitions[-1].acknowledged is False
+    assert after.transitions[-1].detail == {"mode": "graceful", "reason": "estop latched"}
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_while_cancelling_is_sent_again_and_recorded():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+
+    after = await w.runs.get(run.run_id)
+    assert after.status is RunStatus.CANCELLING
+    assert [t.trigger for t in after.transitions[-2:]] == [
+        RunTrigger.CANCEL_REQUEST,
+        RunTrigger.CANCEL_REQUEST,
+    ]
+    assert len(w.dispatcher.cancelled) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_succeeded_report_ends_a_cancelling_run_as_succeeded():
+    w = _World()
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.robot_reports(run, MissionExecStatus.RUNNING)
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+
+    await w.robot_reports(run, MissionExecStatus.SUCCEEDED, header_id=2)
+
+    assert (await w.runs.get(run.run_id)).status is RunStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_dispatch_while_cancelling_ends_cancelled():
+    w = _World()
+    mission = await w.mission()
+    run = await w.run_service.prepare(
+        StartRunCommand(mission_id=mission.mission_id, robot_id=ROBOT_A, origin=ORIGIN)
+    )
+    await w.run_service.cancel(CancelRunCommand(mission_id=mission.mission_id))
+
+    settled = await w.run_service.settle(
+        SettleRunCommand(
+            run_id=run.run_id, outcome=DispatchOutcome.REJECTED, reason="busy", replied_at=UTC_NOW
+        )
+    )
+
+    assert settled.status is RunStatus.CANCELLED
+    assert (await w.runs.get(run.run_id)).transitions[-1].trigger is RunTrigger.REJECT
 
 
 @pytest.mark.asyncio
@@ -889,7 +1051,9 @@ async def test_a_dispatched_run_pauses_when_its_running_frame_was_lost():
     resumed = await w.run_service.resume(
         ResumeRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
     )
-    assert resumed.status is RunStatus.RUNNING
+    assert resumed.status is RunStatus.RESUMING
+    await w.robot_reports(run, MissionExecStatus.RUNNING, header_id=2)
+    assert (await w.runs.get(run.run_id)).status is RunStatus.RUNNING
 
 
 @pytest.mark.asyncio

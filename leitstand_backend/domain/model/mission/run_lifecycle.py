@@ -1,7 +1,7 @@
 """Run lifecycle: the transition table, its helpers, and the trigger a robot report means."""
 
 from enum import Enum
-from typing import Final
+from typing import Final, Literal
 
 from leitstand_backend.domain.errors import InvalidMissionTransition
 from leitstand_backend.domain.model.mission.mission_state import MissionExecStatus
@@ -11,19 +11,50 @@ from leitstand_backend.domain.model.mission.run_status import RunStatus
 class RunTrigger(str, Enum):
     """A lifecycle transition trigger: the named cause of a status change.
 
-    ``ACCEPT``, ``REJECT`` and ``TIMEOUT`` come from the backend's handling of the dispatch reply;
-    the rest come from the robot's reports, except ``CANCEL``, which either side may cause.
+    The ``*_REQUEST`` triggers are the operator asking; ``PAUSE``, ``RESUME``, ``ACK``,
+    ``COMPLETE``, ``FAIL`` and ``CANCEL`` are the robot reporting; the rest are the backend
+    settling a reply, a silence or a robot that came back without the run.
     """
 
     ACCEPT = "accept"
     REJECT = "reject"
     TIMEOUT = "timeout"
+    DISPATCH_UNCONFIRMED = "dispatch_unconfirmed"
+    RECONCILE = "reconcile"
+    PAUSE_REQUEST = "pause_request"
+    RESUME_REQUEST = "resume_request"
+    CANCEL_REQUEST = "cancel_request"
     ACK = "ack"
     PAUSE = "pause"
     RESUME = "resume"
     COMPLETE = "complete"
     FAIL = "fail"
     CANCEL = "cancel"
+
+
+Actor = Literal["operator", "robot", "backend"]
+
+_OPERATOR_TRIGGERS: Final[frozenset[RunTrigger]] = frozenset(
+    {RunTrigger.PAUSE_REQUEST, RunTrigger.RESUME_REQUEST, RunTrigger.CANCEL_REQUEST}
+)
+_BACKEND_TRIGGERS: Final[frozenset[RunTrigger]] = frozenset(
+    {
+        RunTrigger.ACCEPT,
+        RunTrigger.REJECT,
+        RunTrigger.TIMEOUT,
+        RunTrigger.DISPATCH_UNCONFIRMED,
+        RunTrigger.RECONCILE,
+    }
+)
+
+
+def actor_of(trigger: RunTrigger) -> Actor:
+    """Who caused a transition: the operator, the robot's report, or the backend."""
+    if trigger in _OPERATOR_TRIGGERS:
+        return "operator"
+    if trigger in _BACKEND_TRIGGERS:
+        return "backend"
+    return "robot"
 
 
 TERMINAL_STATES: Final[frozenset[RunStatus]] = frozenset(
@@ -45,19 +76,62 @@ _LIVE_STATES: Final[tuple[RunStatus, ...]] = tuple(
 _REPLY_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
     (RunStatus.PENDING, RunTrigger.ACCEPT): RunStatus.DISPATCHED,
     (RunStatus.PENDING, RunTrigger.REJECT): RunStatus.REJECTED,
+    (RunStatus.CANCELLING, RunTrigger.REJECT): RunStatus.CANCELLED,
+}
+
+
+# An operator's request holds the run in a transitional state until the robot reports it.
+_REQUEST_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
+    (RunStatus.DISPATCHED, RunTrigger.PAUSE_REQUEST): RunStatus.PAUSING,
+    (RunStatus.RUNNING, RunTrigger.PAUSE_REQUEST): RunStatus.PAUSING,
+    (RunStatus.RESUMING, RunTrigger.PAUSE_REQUEST): RunStatus.PAUSING,
+    (RunStatus.PAUSED, RunTrigger.RESUME_REQUEST): RunStatus.RESUMING,
+    (RunStatus.PAUSING, RunTrigger.RESUME_REQUEST): RunStatus.RESUMING,
+    **{
+        (state, RunTrigger.CANCEL_REQUEST): RunStatus.CANCELLING
+        for state in (
+            RunStatus.PENDING,
+            RunStatus.DISPATCHED,
+            RunStatus.RUNNING,
+            RunStatus.PAUSED,
+            RunStatus.PAUSING,
+            RunStatus.RESUMING,
+            RunStatus.CANCELLING,
+        )
+    },
 }
 
 
 # Progress the robot reports. It may report before the dispatch reply is recorded, because its
-# executor starts before it answers the dispatch query.
+# executor starts before it answers the dispatch query. (PAUSING, ACK) and (RESUMING, PAUSE) are
+# absent: the robot has not applied the request yet.
 _PROGRESS_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
     (RunStatus.PENDING, RunTrigger.ACK): RunStatus.RUNNING,
     (RunStatus.DISPATCHED, RunTrigger.ACK): RunStatus.RUNNING,
+    (RunStatus.RESUMING, RunTrigger.ACK): RunStatus.RUNNING,
     # A lost RUNNING frame would otherwise leave a paused machine in a state neither pause nor
     # resume can leave; PENDING is excluded because no robot has accepted such a run yet.
     (RunStatus.DISPATCHED, RunTrigger.PAUSE): RunStatus.PAUSED,
     (RunStatus.RUNNING, RunTrigger.PAUSE): RunStatus.PAUSED,
+    (RunStatus.PAUSING, RunTrigger.PAUSE): RunStatus.PAUSED,
     (RunStatus.PAUSED, RunTrigger.RESUME): RunStatus.RUNNING,
+}
+
+
+# A robot that came back without a run: the run is closed on the backend's authority.
+_RECONCILE_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
+    (RunStatus.CANCELLING, RunTrigger.RECONCILE): RunStatus.CANCELLED,
+    **{
+        (state, RunTrigger.RECONCILE): RunStatus.FAILED
+        for state in (
+            RunStatus.PENDING,
+            RunStatus.DISPATCHED,
+            RunStatus.RUNNING,
+            RunStatus.PAUSED,
+            RunStatus.PAUSING,
+            RunStatus.RESUMING,
+        )
+    },
 }
 
 
@@ -73,7 +147,9 @@ _OUTCOMES: Final[dict[RunTrigger, RunStatus]] = {
 
 ALLOWED_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
     **_REPLY_TRANSITIONS,
+    **_REQUEST_TRANSITIONS,
     **_PROGRESS_TRANSITIONS,
+    **_RECONCILE_TRANSITIONS,
     **{
         (state, trigger): outcome
         for trigger, outcome in _OUTCOMES.items()
@@ -88,11 +164,18 @@ EXECUTING_STATES: Final[frozenset[RunStatus]] = frozenset(
         RunStatus.DISPATCHED,
         RunStatus.RUNNING,
         RunStatus.PAUSED,
+        RunStatus.PAUSING,
+        RunStatus.RESUMING,
+        RunStatus.CANCELLING,
     }
 )
 
 
 ACTIVE_STATES: Final[frozenset[RunStatus]] = EXECUTING_STATES | {RunStatus.PENDING}
+
+CONFIRMING_STATES: Final[frozenset[RunStatus]] = frozenset(
+    {RunStatus.PAUSING, RunStatus.RESUMING, RunStatus.CANCELLING}
+)
 
 
 def next_state(current: RunStatus, trigger: RunTrigger) -> RunStatus:
@@ -129,6 +212,11 @@ def is_executing(state: RunStatus) -> bool:
 def is_active(state: RunStatus) -> bool:
     """Return True while the run occupies its robot and counts against the mission."""
     return state in ACTIVE_STATES
+
+
+def is_confirming(state: RunStatus) -> bool:
+    """Return True while an operator's request awaits the robot's report."""
+    return state in CONFIRMING_STATES
 
 
 def is_outcome(exec_status: MissionExecStatus) -> bool:

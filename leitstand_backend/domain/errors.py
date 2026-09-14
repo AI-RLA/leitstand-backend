@@ -330,3 +330,22 @@ class MissionDispatchFailed(DomainError):
         self.run_id = run_id
         self.robot_id = robot_id
         self.reason = reason
+
+
+class RobotUnreachable(DomainError):
+    """The robot did not answer a command within the wait, so nothing was applied."""
+
+    def __init__(self, robot_id: str, command: str):
+        super().__init__(f"robot {robot_id!r} did not receive the {command}")
+        self.robot_id = robot_id
+        self.command = command
+
+
+class RobotRefusedControl(DomainError):
+    """The robot answered that it will not apply the command, with its reason."""
+
+    def __init__(self, robot_id: str, command: str, reason: str | None):
+        super().__init__(f"robot {robot_id!r} refused the {command}: {reason or 'no reason given'}")
+        self.robot_id = robot_id
+        self.command = command
+        self.reason = reason

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from leitstand_backend.application.mission_events import emit_run_lifecycle
@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 _REASON = "the robot reconnected without reporting this run"
 
+# A dispatch may still be in flight when the robot answers, so a PENDING run this young is left
+# to the dispatch path.
+_DISPATCH_WINDOW = timedelta(seconds=10)
+
 
 async def reconcile_robot_runs(
     runs: MissionRunRepository,
@@ -30,14 +34,18 @@ async def reconcile_robot_runs(
     events: EventPublisher,
     robot_id: str,
     since: datetime,
+    claimed_run_id: str | None = None,
+    claim_reported: bool = False,
 ) -> list[UUID]:
-    """Fail the robot's live runs it has not reported since ``since``, and return their ids.
+    """Close the robot's live runs it does not hold, and return their ids.
 
-    A robot executing a run publishes its state every few seconds, so one reachable for the
-    grace window without mentioning a run it held is not driving it. The cancel is sent first,
-    because the only harmful mistake is a robot that is still moving.
+    When the robot reported its claim, every live run but the claimed one is closed at once (a
+    claim of null closes them all). Without a claim, a run the robot has not reported since
+    ``since`` is closed; that path serves clients that do not answer the claim yet. The cancel
+    is sent first, because the only harmful mistake is a robot that is still moving.
     """
     ended: list[UUID] = []
+    now = datetime.now(since.tzinfo)
     for summary in await runs.list_active_by_robot(robot_id):
         run = await runs.get(summary.run_id)
         if run is None or is_terminal(run.status):
@@ -46,7 +54,15 @@ async def reconcile_robot_runs(
             # Started after the robot answered again, so this reconnection cannot judge it; the
             # dispatch path settles it.
             continue
-        if run.last_frame_at is not None and run.last_frame_at >= since:
+        if claim_reported and str(run.run_id) == claimed_run_id:
+            continue
+        if run.status is RunStatus.PENDING and now - run.created_at < _DISPATCH_WINDOW:
+            continue
+        if (
+            not claim_reported
+            and run.last_report is not None
+            and run.last_report.received_at >= since
+        ):
             continue
 
         await dispatcher.cancel(run.run_id, run.robot_id)
@@ -56,27 +72,33 @@ async def reconcile_robot_runs(
             type="run_unclaimed_after_reconnect",
             description=_REASON,
         )
+        target = RunStatus.CANCELLED if run.status is RunStatus.CANCELLING else RunStatus.FAILED
         updated = await runs.update_status(
-            run.run_id, RunStatus.FAILED, expected=run.status, errors=[error]
+            run.run_id,
+            target,
+            expected=run.status,
+            trigger=RunTrigger.RECONCILE,
+            detail={"reason": _REASON},
+            errors=[error],
         )
         if updated is None:
             continue
 
-        await settle_stage_state(runs, events, run, RunStatus.FAILED, [error])
+        await settle_stage_state(runs, events, run, target, [error])
         emit_run_lifecycle(
             events,
             run.mission_id,
             run.run_id,
             run.robot_id,
-            RunStatus.FAILED,
-            RunTrigger.TIMEOUT,
+            target,
+            RunTrigger.RECONCILE,
             reason=_REASON,
         )
         ended.append(run.run_id)
 
     if ended:
         logger.warning(
-            "robot %s reconnected without claiming %d run(s); failed: %s",
+            "robot %s reconnected without claiming %d run(s); closed: %s",
             robot_id,
             len(ended),
             ", ".join(str(rid) for rid in ended),
