@@ -1,10 +1,6 @@
-"""Robot operational status: the status vocabulary and its derivation rule.
+"""Robot operational status: the status vocabulary and the rule that derives it.
 
-``RobotStatus`` is the displayed status; ``derive_robot_status`` composes it from facts
-the backend owns -- liveliness, the mission relationship, and battery. It is a derived
-rule, so it lives beside the other pure domain rules (cf. ``mission_lifecycle``) rather
-than with the robot-reported payloads in ``telemetry``. Inputs are plain bools to keep
-the rule decoupled from the mission domain.
+Inputs are plain bools, so the rule does not depend on the mission model.
 """
 
 from enum import Enum

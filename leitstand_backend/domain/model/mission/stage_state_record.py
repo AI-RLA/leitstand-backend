@@ -22,12 +22,11 @@ StatusSource = Literal["robot", "backend"]
 
 
 class StageStateRecord(BaseModel):
-    """One stage's current runtime state within a run, persisted per ``(run_id, stage_id)``.
+    """One stage's current runtime state within a run, one record per stage.
 
-    Distinct from the stage *definition* (waypoints/kind, on the mission): this is the
-    *runtime* view. ``header_id`` is the robot's monotone per-frame counter and orders
-    concurrent writes so an older or reordered frame never overwrites a newer one;
-    ``source_ts`` is the frame's robot-clock time, kept as informational metadata only.
+    Distinct from the stage definition on the mission. ``header_id`` is the robot's report
+    counter, so an older or reordered report never overwrites a newer one; ``source_ts`` is the
+    report's robot-clock time.
     """
 
     stage_id: UUID

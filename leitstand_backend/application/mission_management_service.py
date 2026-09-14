@@ -6,12 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from leitstand_backend.application.mission_validation import (
-    require_current_boundary,
-    validate_against_factsheet,
-    validate_plan_fits_robot,
-)
-from leitstand_backend.domain import event_topics
+from leitstand_backend.application.coverage_boundary import require_current_boundary
 from leitstand_backend.domain.errors import (
     DuplicateStageId,
     MissionArchived,
@@ -20,9 +15,7 @@ from leitstand_backend.domain.errors import (
     MissionRunInProgress,
     RobotBusy,
     RobotFactsheetMissing,
-    StageNotHomogeneous,
     StageNotInMission,
-    StageSpansSites,
     UnknownSite,
 )
 from leitstand_backend.domain.model.mission.mission import (
@@ -32,9 +25,15 @@ from leitstand_backend.domain.model.mission.mission import (
     Stage,
     referenced_site_ids,
     replace_stage,
-    stage_waypoints,
 )
-from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint
+from leitstand_backend.domain.model.mission.robot_fit import (
+    validate_against_factsheet,
+    validate_plan_fits_robot,
+)
+from leitstand_backend.domain.model.mission.stage_rules import (
+    validate_homogeneous_frames,
+    validate_single_site,
+)
 from leitstand_backend.ports.inbound.mission_management import (
     AssignMissionCommand,
     CoverageStageRef,
@@ -49,7 +48,7 @@ from leitstand_backend.ports.inbound.mission_management import (
     UpdateMissionCommand,
 )
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.event_publisher import EventPublisher, mission_topic
 from leitstand_backend.ports.outbound.field_repository import FieldRepository
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
@@ -99,7 +98,7 @@ class MissionManagementService(MissionManagementUseCase):
         # Not a lifecycle event: a mission comes into existence rather than transitioning into it.
         # Announced anyway, or a mission created in one place stays invisible everywhere else.
         self._events.publish(
-            event_topics.mission_topic(saved.mission_id, "created"),
+            mission_topic(saved.mission_id, "created"),
             {"mission_id": str(saved.mission_id)},
         )
         return saved
@@ -273,9 +272,9 @@ class MissionManagementService(MissionManagementUseCase):
         In that order, so a mixed-frame stage or a mistyped site gets its own error instead of
         the generic one.
         """
-        _validate_homogeneity(stages)
+        validate_homogeneous_frames(stages)
         await self._validate_sites_exist(stages)
-        _validate_single_site(stages)
+        validate_single_site(stages)
 
     async def _validate_sites_exist(self, stages: list[Stage]) -> None:
         """Reject stages referencing a site_id absent from the backend catalog.
@@ -346,23 +345,3 @@ def _with_ids(
         return staged
 
     return build(inputs)
-
-
-def _validate_homogeneity(stages: list[Stage]) -> None:
-    """All waypoints in a stage must share their ``kind`` discriminator."""
-    for index, stage in enumerate(stages):
-        kinds = {wp.kind for wp in stage_waypoints(stage)}
-        if len(kinds) > 1:
-            raise StageNotHomogeneous(index, kinds)
-        if stage.on_cancel:
-            _validate_homogeneity(stage.on_cancel)
-
-
-def _validate_single_site(stages: list[Stage]) -> None:
-    """A site-local stage is driven in one site's frame; a WGS84 stage names none."""
-    for index, stage in enumerate(stages):
-        sites = {wp.site_id for wp in stage_waypoints(stage) if isinstance(wp, SiteLocalWaypoint)}
-        if len(sites) > 1:
-            raise StageSpansSites(index, sites)
-        if stage.on_cancel:
-            _validate_single_site(stage.on_cancel)

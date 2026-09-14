@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from leitstand_backend.application.robot_factsheet_service import RobotFactsheetService
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.model.robot.robot_factsheet import (
     NavigationCapability,
     RobotFactsheet,
@@ -19,6 +18,7 @@ from leitstand_backend.domain.model.robot.robot_factsheet import (
 from leitstand_backend.infrastructure.event_bus import EventBus
 from leitstand_backend.infrastructure.factsheet_view import EventBusBackedRobotFactsheetView
 from leitstand_backend.ports.inbound.robot_factsheet import RecordRobotFactsheetCommand
+from leitstand_backend.ports.outbound.event_publisher import robot_topic
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_robot_repository import InMemoryRobotRepository
 
@@ -41,7 +41,7 @@ async def test_record_persists_and_latches_the_factsheet():
 
     assert repo.factsheets[ROBOT_ID]["robot_id"] == ROBOT_ID
     (topic, payload, latch) = events.published[0]
-    assert topic == event_topics.robot_topic(ROBOT_ID, "factsheet")
+    assert topic == robot_topic(ROBOT_ID, "factsheet")
     assert latch is True
     # The two copies must not diverge: the startup seed republishes the row onto this topic.
     assert payload == repo.factsheets[ROBOT_ID]
@@ -79,7 +79,7 @@ def test_a_latched_payload_is_readable_as_a_factsheet():
     bus = EventBus()
     view = EventBusBackedRobotFactsheetView(bus)
     bus.publish(
-        event_topics.robot_topic(ROBOT_ID, "factsheet"),
+        robot_topic(ROBOT_ID, "factsheet"),
         _factsheet().model_dump(mode="json"),
         latch=True,
     )
@@ -101,7 +101,7 @@ def test_a_factsheet_this_backend_cannot_read_costs_only_that_robot():
     bus = EventBus()
     view = EventBusBackedRobotFactsheetView(bus)
     bus.publish(
-        event_topics.robot_topic(ROBOT_ID, "factsheet"),
+        robot_topic(ROBOT_ID, "factsheet"),
         {"robot_id": ROBOT_ID, "physical_parameters": {"width_m": 0.58}},
         latch=True,
     )

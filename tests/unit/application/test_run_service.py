@@ -63,6 +63,7 @@ from leitstand_backend.ports.inbound.run_management import (
     SettleRunCommand,
     StartRunCommand,
 )
+from leitstand_backend.ports.outbound.event_publisher import mission_topic
 from tests.fakes.fake_mission_dispatcher import FakeMissionDispatcher
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_field_repository import InMemoryFieldRepository
@@ -932,14 +933,13 @@ async def test_a_failed_run_keeps_the_dispatch_cause_beside_the_robots_own():
 @pytest.mark.asyncio
 async def test_deleting_a_missions_last_run_drops_its_latched_state_frame():
     """Left latched, it would show a finished run on a mission that reads as never run."""
-    from leitstand_backend.domain import event_topics
     from leitstand_backend.ports.inbound.run_management import DeleteRunCommand
 
     w = _World()
     mission = await w.mission()
     run = await w.start(mission.mission_id)
     await w.complete(run)
-    topic = event_topics.mission_topic(mission.mission_id, "state")
+    topic = mission_topic(mission.mission_id, "state")
     assert topic not in w.events.unlatched
 
     await w.run_service.delete(DeleteRunCommand(run_id=run.run_id))
@@ -950,7 +950,6 @@ async def test_deleting_a_missions_last_run_drops_its_latched_state_frame():
 @pytest.mark.asyncio
 async def test_deleting_one_of_several_runs_leaves_the_latch_alone():
     """Another run remains, so the latched frame stays."""
-    from leitstand_backend.domain import event_topics
     from leitstand_backend.ports.inbound.run_management import DeleteRunCommand
 
     w = _World()
@@ -962,7 +961,7 @@ async def test_deleting_one_of_several_runs_leaves_the_latch_alone():
 
     await w.run_service.delete(DeleteRunCommand(run_id=first.run_id))
 
-    assert event_topics.mission_topic(mission.mission_id, "state") not in w.events.unlatched
+    assert mission_topic(mission.mission_id, "state") not in w.events.unlatched
 
 
 @pytest.mark.asyncio

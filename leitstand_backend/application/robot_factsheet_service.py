@@ -1,11 +1,10 @@
 """RobotFactsheetService - persist the latest factsheet per robot and latch it on the EventBus."""
 
-from leitstand_backend.domain import event_topics
 from leitstand_backend.ports.inbound.robot_factsheet import (
     RecordRobotFactsheetCommand,
     RobotFactsheetUseCase,
 )
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.event_publisher import EventPublisher, robot_topic
 from leitstand_backend.ports.outbound.robot_repository import RobotRepository
 
 
@@ -24,4 +23,4 @@ class RobotFactsheetService(RobotFactsheetUseCase):
         robot_id = command.factsheet.robot_id
         payload = command.factsheet.model_dump(mode="json")
         await self._repo.save_factsheet(robot_id, payload)
-        self._events.publish(event_topics.robot_topic(robot_id, "factsheet"), payload, latch=True)
+        self._events.publish(robot_topic(robot_id, "factsheet"), payload, latch=True)

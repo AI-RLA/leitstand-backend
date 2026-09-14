@@ -10,6 +10,7 @@ from uuid import UUID
 from geojson_pydantic import Polygon
 from pydantic import BaseModel, ConfigDict, Field
 
+from leitstand_backend.domain.errors import CoveragePlanRejected
 from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
 
 
@@ -174,3 +175,41 @@ class CoverageProvenance(BaseModel):
 def boundary_digest(boundary: Polygon) -> str:
     """Return a stable digest of a field boundary, so an edit after planning is detectable."""
     return hashlib.sha256(boundary.model_dump_json().encode()).hexdigest()
+
+
+# The floor excludes the headland (withheld, not missed); the ceiling includes it (swaths overhang).
+_MIN_COVERED_FRACTION = 0.25
+_MAX_COVERED_FRACTION = 1.25
+
+# Track length times working width re-measures the covered area; a twofold gap means one is wrong.
+_MAX_SWEPT_AREA_RATIO = 2.0
+
+
+def validate_plan(plan: CoveragePlan, field_area_m2: float, params: CoverageParams) -> None:
+    """Reject a plan whose numbers do not describe the field it claims to cover."""
+    # Cheapest disagreement to catch: metrics that do not describe the geometry they arrived with.
+    swaths = sum(1 for seg in plan.segments if seg.kind == "swath")
+    if plan.metrics.swath_count != swaths:
+        raise CoveragePlanRejected(
+            f"the plan reports {plan.metrics.swath_count} swaths but carries {swaths}"
+        )
+
+    covered = plan.metrics.covered_area_m2
+    mainland = plan.metrics.mainland_area_m2 or field_area_m2
+    if covered / mainland < _MIN_COVERED_FRACTION:
+        raise CoveragePlanRejected(
+            f"the plan covers {covered:.0f} m2 of the {mainland:.0f} m2 that a "
+            f"{params.headland_width_m} m headland leaves as mainland in a "
+            f"{field_area_m2:.0f} m2 field"
+        )
+    if covered / field_area_m2 > _MAX_COVERED_FRACTION:
+        raise CoveragePlanRejected(
+            f"the plan covers {covered:.0f} m2 of a {field_area_m2:.0f} m2 field"
+        )
+
+    swept = plan.metrics.track_length_m * params.operation_width_m
+    if not covered / _MAX_SWEPT_AREA_RATIO <= swept <= covered * _MAX_SWEPT_AREA_RATIO:
+        raise CoveragePlanRejected(
+            f"{plan.metrics.track_length_m:.0f} m of track at {params.operation_width_m} m wide "
+            f"sweeps {swept:.0f} m2, not the {covered:.0f} m2 reported"
+        )

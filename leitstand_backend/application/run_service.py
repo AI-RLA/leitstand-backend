@@ -5,17 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from leitstand_backend.application.coverage_boundary import require_current_boundary
 from leitstand_backend.application.mission_events import emit_run_lifecycle
-from leitstand_backend.application.mission_validation import (
-    require_current_boundary,
-    validate_against_factsheet,
-    validate_plan_fits_robot,
-)
 from leitstand_backend.application.run_state_view import (
     publish_run_state,
     settle_stage_state,
 )
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.errors import (
     AmbiguousRun,
     InvalidMissionTransition,
@@ -37,6 +32,10 @@ from leitstand_backend.domain.model.mission.mission_state import (
     ErrorOrigin,
     ErrorSeverity,
     MissionError,
+)
+from leitstand_backend.domain.model.mission.robot_fit import (
+    validate_against_factsheet,
+    validate_plan_fits_robot,
 )
 from leitstand_backend.domain.model.mission.run_lifecycle import (
     RunTrigger,
@@ -60,7 +59,7 @@ from leitstand_backend.ports.inbound.run_management import (
     StartRunCommand,
 )
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.event_publisher import EventPublisher, mission_topic
 from leitstand_backend.ports.outbound.field_repository import FieldRepository
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
@@ -343,7 +342,7 @@ class RunService(RunManagementUseCase):
         if not await self._runs.count_by_mission(run.mission_id):
             # Nothing is left to describe, and the latched frame would otherwise show a finished
             # run on a mission that reads as never run.
-            self._events.unlatch(event_topics.mission_topic(run.mission_id, "state"))
+            self._events.unlatch(mission_topic(run.mission_id, "state"))
         # The row goes; the audit log keeps the attempt.
         await self._audit(
             "run.delete",

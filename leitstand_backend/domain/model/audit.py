@@ -4,9 +4,6 @@ A row is written for a change someone commanded. A change the world causes rathe
 a robot dropping mid-mission or telemetry reporting a stage finished, writes no row here: its
 durable trace is the mission record's status, errors and stage states. Silence in this log means
 nobody commanded it, not that nothing happened.
-
-Kept in the domain because the outbound port, the Postgres adapter and the provenance
-infrastructure all need these values, and a port cannot import infrastructure.
 """
 
 from __future__ import annotations

@@ -17,7 +17,7 @@ from contextvars import ContextVar
 from fastapi import HTTPException, status
 from starlette.datastructures import Headers
 
-from leitstand_backend.domain.user import DUMMY_OPERATOR, User
+from leitstand_backend.domain.user import User
 from leitstand_backend.infrastructure.settings import Settings
 
 _BEARER_SCHEME = "bearer"
@@ -31,6 +31,9 @@ WS_SUBPROTOCOL = "leitstand.v1"
 # app through a loopback that meets this same gate, and forwarding the caller's own credential is
 # what keeps a tool call attributable to the operator rather than to a service identity.
 caller_credential: ContextVar[str | None] = ContextVar("caller_credential", default=None)
+
+# One shared token, so every caller is the same operator until real identity exists.
+_SHARED_OPERATOR = User(id="operator", name="Operator")
 
 
 def bearer_token(authorization: str | None) -> str | None:
@@ -86,7 +89,7 @@ def authenticate(settings: Settings, authorization: str | None) -> User:
             "missing or invalid bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return DUMMY_OPERATOR
+    return _SHARED_OPERATOR
 
 
 class CredentialContextMiddleware:

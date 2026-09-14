@@ -2,10 +2,9 @@
 
 from uuid import UUID
 
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.model.mission.run_lifecycle import RunTrigger
 from leitstand_backend.domain.model.mission.run_status import RunStatus
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.event_publisher import EventPublisher, mission_topic
 
 
 def emit_run_lifecycle(
@@ -33,4 +32,4 @@ def emit_run_lifecycle(
     }
     if reason is not None:
         payload["reason"] = reason
-    events.publish(event_topics.mission_topic(mission_id, "lifecycle"), payload, latch=False)
+    events.publish(mission_topic(mission_id, "lifecycle"), payload, latch=False)

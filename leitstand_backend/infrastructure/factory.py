@@ -66,7 +66,6 @@ from leitstand_backend.application.robot_connectivity_service import RobotConnec
 from leitstand_backend.application.robot_factsheet_service import RobotFactsheetService
 from leitstand_backend.application.robot_telemetry_service import RobotTelemetryService
 from leitstand_backend.application.run_reconciliation import reconcile_robot_runs
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.errors import CoveragePlannerUnavailable
 from leitstand_backend.domain.model.mission.coverage import CoverageParams, CoveragePlan
 from leitstand_backend.domain.model.mission.mission import Stage
@@ -103,6 +102,7 @@ from leitstand_backend.ports.inbound.robot_connectivity import (
 )
 from leitstand_backend.ports.inbound.robot_factsheet import RobotFactsheetUseCase
 from leitstand_backend.ports.outbound.coverage_planner import CoveragePlanner
+from leitstand_backend.ports.outbound.event_publisher import robot_topic
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 
 logger = structlog.get_logger(__name__)
@@ -166,7 +166,7 @@ async def _seed_event_bus_from_db(
             ("factsheet", row.factsheet_json),
         ]:
             if payload is not None:
-                bus.publish(event_topics.robot_topic(row.id, kind), payload, latch=True)
+                bus.publish(robot_topic(row.id, kind), payload, latch=True)
     logger.info("event_bus_seeded_from_db", robots=len(rows))
 
 
@@ -366,7 +366,7 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
             robot = await service.record_offline(command)
             if robot is not None:
                 for kind in ("pose", "battery"):
-                    payload = self._bus.latched(event_topics.robot_topic(command.robot_id, kind))
+                    payload = self._bus.latched(robot_topic(command.robot_id, kind))
                     if payload is not None:
                         await repo.save_telemetry(command.robot_id, kind, payload)
         if self._mission_state_uc is not None:

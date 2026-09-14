@@ -7,13 +7,13 @@ from uuid import uuid4
 
 import pytest
 
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
 from leitstand_backend.infrastructure.event_bus import EventBus
 from leitstand_backend.infrastructure.robot_status_projector import (
     RobotStatusProjector,
     RobotStatusReadModel,
 )
+from leitstand_backend.ports.outbound.event_publisher import REGISTRY, mission_topic, robot_topic
 
 
 class FakeReadModel(RobotStatusReadModel):
@@ -54,10 +54,10 @@ async def test_registry_event_publishes_status() -> None:
     bus = EventBus()
     rm = FakeReadModel({"r1": RobotStatus.IDLE})
     proj = _projector(bus, rm)
-    status_q = bus.subscribe(event_topics.robot_topic("r1", "status"))
+    status_q = bus.subscribe(robot_topic("r1", "status"))
     proj.start()
     try:
-        bus.publish(event_topics.REGISTRY, {"type": "robot.online", "robot_id": "r1"}, latch=False)
+        bus.publish(REGISTRY, {"type": "robot.online", "robot_id": "r1"}, latch=False)
         event = await _next_status(status_q)
         assert event["topic"] == "events/robot/r1/status"
         assert event["payload"] == {"status": "idle"}
@@ -72,11 +72,11 @@ async def test_lifecycle_event_names_its_robot() -> None:
     mission_id = uuid4()
     rm = FakeReadModel({"r2": RobotStatus.ACTIVE})
     proj = _projector(bus, rm)
-    status_q = bus.subscribe(event_topics.robot_topic("r2", "status"))
+    status_q = bus.subscribe(robot_topic("r2", "status"))
     proj.start()
     try:
         bus.publish(
-            event_topics.mission_topic(mission_id, "lifecycle"),
+            mission_topic(mission_id, "lifecycle"),
             {
                 "mission_id": str(mission_id),
                 "run_id": str(uuid4()),
@@ -102,9 +102,9 @@ async def test_publish_on_change_suppresses_duplicate() -> None:
     try:
         # r1 -> idle (published), r1 again -> idle (suppressed), r2 -> active (published).
         # All three ride the registry FIFO queue, so the received order is deterministic.
-        bus.publish(event_topics.REGISTRY, {"robot_id": "r1"}, latch=False)
-        bus.publish(event_topics.REGISTRY, {"robot_id": "r1"}, latch=False)
-        bus.publish(event_topics.REGISTRY, {"robot_id": "r2"}, latch=False)
+        bus.publish(REGISTRY, {"robot_id": "r1"}, latch=False)
+        bus.publish(REGISTRY, {"robot_id": "r1"}, latch=False)
+        bus.publish(REGISTRY, {"robot_id": "r2"}, latch=False)
 
         first = await _next_status(status_q)
         second = await _next_status(status_q)
@@ -130,9 +130,9 @@ async def test_non_lifecycle_mission_topic_is_ignored() -> None:
     proj.start()
     try:
         # A .../state frame must not trigger a recompute; the following lifecycle event must.
-        bus.publish(event_topics.mission_topic(mission_id, "state"), {"x": 1}, latch=False)
+        bus.publish(mission_topic(mission_id, "state"), {"x": 1}, latch=False)
         bus.publish(
-            event_topics.mission_topic(mission_id, "lifecycle"),
+            mission_topic(mission_id, "lifecycle"),
             {
                 "mission_id": str(mission_id),
                 "run_id": str(uuid4()),
@@ -154,11 +154,11 @@ async def test_failing_compute_does_not_kill_the_loop() -> None:
     bus = EventBus()
     rm = FakeReadModel({"bad": RobotStatus.IDLE, "r1": RobotStatus.ACTIVE}, raises_for={"bad"})
     proj = _projector(bus, rm)
-    status_q = bus.subscribe(event_topics.robot_topic("r1", "status"))
+    status_q = bus.subscribe(robot_topic("r1", "status"))
     proj.start()
     try:
-        bus.publish(event_topics.REGISTRY, {"robot_id": "bad"}, latch=False)
-        bus.publish(event_topics.REGISTRY, {"robot_id": "r1"}, latch=False)
+        bus.publish(REGISTRY, {"robot_id": "bad"}, latch=False)
+        bus.publish(REGISTRY, {"robot_id": "r1"}, latch=False)
         event = await _next_status(status_q)
         assert event["payload"] == {"status": "active"}  # loop survived the boom
     finally:

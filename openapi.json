@@ -2357,7 +2357,7 @@
           "description"
         ],
         "title": "MissionError",
-        "description": "A structured error report attached to a stage or mission.\n\nMirrors the proto ``Error`` (severity / type / references / description); ``origin``\nis a backend-only marker distinguishing a robot fault from a backend-authored cause."
+        "description": "A structured error report attached to a stage or mission.\n\n``origin`` says whether the robot reported it or the backend authored it."
       },
       "MissionUpdate": {
         "properties": {

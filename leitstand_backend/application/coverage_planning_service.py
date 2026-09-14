@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from leitstand_backend.application.mission_validation import coverage_stages
 from leitstand_backend.domain.errors import (
     CoveragePlanRejected,
     FieldNotFoundError,
@@ -17,9 +16,9 @@ from leitstand_backend.domain.errors import (
 )
 from leitstand_backend.domain.model.mission.coverage import (
     CoverageParams,
-    CoveragePlan,
     CoverageProvenance,
     boundary_digest,
+    validate_plan,
 )
 from leitstand_backend.domain.model.mission.mission import (
     CoverageStage,
@@ -27,6 +26,7 @@ from leitstand_backend.domain.model.mission.mission import (
     Segment,
     StageKind,
 )
+from leitstand_backend.domain.model.mission.stage_rules import coverage_stages
 from leitstand_backend.ports.inbound.coverage_planning import (
     CoveragePlanningUseCase,
     PlanCoverageCommand,
@@ -42,13 +42,6 @@ from leitstand_backend.ports.outbound.mission_repository import MissionRepositor
 from leitstand_backend.ports.outbound.robot_factsheet_view import RobotFactsheetView
 
 _SQUARE_METRES_PER_HECTARE = 10_000
-
-# The floor excludes the headland (withheld, not missed); the ceiling includes it (swaths overhang).
-_MIN_COVERED_FRACTION = 0.25
-_MAX_COVERED_FRACTION = 1.25
-
-# Track length times working width re-measures the covered area; a twofold gap means one is wrong.
-_MAX_SWEPT_AREA_RATIO = 2.0
 
 
 class CoveragePlanningService(CoveragePlanningUseCase):
@@ -116,7 +109,7 @@ class CoveragePlanningService(CoveragePlanningUseCase):
         # The planner picks a swath angle when the caller leaves it open, so the record of what
         # was planned takes it from the answer rather than from the question.
         params = params.model_copy(update={"swath_angle_deg": plan.swath_angle_deg})
-        _validate(plan, field_area_m2, params)
+        validate_plan(plan, field_area_m2, params)
 
         stage = CoverageStage(
             stage_id=uuid4(),
@@ -177,33 +170,3 @@ class CoveragePlanningService(CoveragePlanningUseCase):
                 f"coverage stage {stage_id} covers a different field and cannot be superseded"
             )
         return mission
-
-
-def _validate(plan: CoveragePlan, field_area_m2: float, params: CoverageParams) -> None:
-    """Reject a plan that does not describe the field it claims to cover."""
-    # Cheapest disagreement to catch: metrics that do not describe the geometry they arrived with.
-    swaths = sum(1 for seg in plan.segments if seg.kind == "swath")
-    if plan.metrics.swath_count != swaths:
-        raise CoveragePlanRejected(
-            f"the plan reports {plan.metrics.swath_count} swaths but carries {swaths}"
-        )
-
-    covered = plan.metrics.covered_area_m2
-    mainland = plan.metrics.mainland_area_m2 or field_area_m2
-    if covered / mainland < _MIN_COVERED_FRACTION:
-        raise CoveragePlanRejected(
-            f"the plan covers {covered:.0f} m2 of the {mainland:.0f} m2 that a "
-            f"{params.headland_width_m} m headland leaves as mainland in a "
-            f"{field_area_m2:.0f} m2 field"
-        )
-    if covered / field_area_m2 > _MAX_COVERED_FRACTION:
-        raise CoveragePlanRejected(
-            f"the plan covers {covered:.0f} m2 of a {field_area_m2:.0f} m2 field"
-        )
-
-    swept = plan.metrics.track_length_m * params.operation_width_m
-    if not covered / _MAX_SWEPT_AREA_RATIO <= swept <= covered * _MAX_SWEPT_AREA_RATIO:
-        raise CoveragePlanRejected(
-            f"{plan.metrics.track_length_m:.0f} m of track at {params.operation_width_m} m wide "
-            f"sweeps {swept:.0f} m2, not the {covered:.0f} m2 reported"
-        )

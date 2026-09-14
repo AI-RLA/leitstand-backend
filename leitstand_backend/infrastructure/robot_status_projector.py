@@ -35,10 +35,9 @@ from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_a
     PostgresRobotRepositoryAdapter,
 )
 from leitstand_backend.application.robot_status_service import RobotStatusService
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
 from leitstand_backend.infrastructure.db import transactional_scope
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.event_publisher import REGISTRY, EventPublisher, robot_topic
 from leitstand_backend.ports.outbound.event_subscriber import EventSubscriber
 from leitstand_backend.ports.outbound.robot_state_view import RobotStateView
 
@@ -91,7 +90,7 @@ class SessionScopedRobotStatusReadModel(RobotStatusReadModel):
 class RobotStatusProjector:
     """Subscribe to status-affecting events and publish each robot's derived status."""
 
-    _REGISTRY_PREFIX = event_topics.REGISTRY
+    _REGISTRY_PREFIX = REGISTRY
     _MISSION_PREFIX = "events/mission"
 
     def __init__(
@@ -159,7 +158,7 @@ class RobotStatusProjector:
                 return
             self._last[robot_id] = status.value
             self._pub.publish(
-                event_topics.robot_topic(robot_id, "status"),
+                robot_topic(robot_id, "status"),
                 {"status": status.value},
                 latch=True,
             )

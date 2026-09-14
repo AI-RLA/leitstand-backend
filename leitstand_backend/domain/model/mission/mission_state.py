@@ -47,8 +47,7 @@ class ErrorReference(BaseModel):
 class MissionError(BaseModel):
     """A structured error report attached to a stage or mission.
 
-    Mirrors the proto ``Error`` (severity / type / references / description); ``origin``
-    is a backend-only marker distinguishing a robot fault from a backend-authored cause.
+    ``origin`` says whether the robot reported it or the backend authored it.
     """
 
     origin: ErrorOrigin
@@ -86,8 +85,8 @@ class MissionStateMessage(BaseModel):
     header_id: int = Field(
         ge=0,
         description=(
-            "Monotone counter per Zenoh key, scoped to a robot's mission-state "
-            "channel. Lets consumers detect dropped messages."
+            "Counter the robot increases with every report of a run, so a reordered or "
+            "repeated report can be told from a newer one."
         ),
     )
     timestamp: datetime

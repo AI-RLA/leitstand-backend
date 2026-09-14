@@ -3,6 +3,7 @@
 import pytest
 
 from leitstand_backend.domain.errors import InvalidMissionTransition
+from leitstand_backend.domain.model.mission.mission_state import MissionExecStatus
 from leitstand_backend.domain.model.mission.run_lifecycle import (
     ACTIVE_STATES,
     ALLOWED_TRANSITIONS,
@@ -11,8 +12,10 @@ from leitstand_backend.domain.model.mission.run_lifecycle import (
     RunTrigger,
     is_active,
     is_executing,
+    is_outcome,
     is_terminal,
     next_state,
+    trigger_for_report,
     try_next_state,
 )
 from leitstand_backend.domain.model.mission.run_status import RunStatus
@@ -174,3 +177,26 @@ def test_try_next_state_returns_none_for_a_report_that_does_not_apply():
     assert try_next_state(RunStatus.RUNNING, RunTrigger.ACK) is None
     assert try_next_state(RunStatus.SUCCEEDED, RunTrigger.COMPLETE) is None
     assert try_next_state(RunStatus.PAUSED, RunTrigger.COMPLETE) is RunStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    ("current", "exec_status", "expected"),
+    [
+        (RunStatus.DISPATCHED, MissionExecStatus.RUNNING, RunTrigger.ACK),
+        (RunStatus.PAUSED, MissionExecStatus.RUNNING, RunTrigger.RESUME),
+        (RunStatus.RUNNING, MissionExecStatus.PAUSED, RunTrigger.PAUSE),
+        (RunStatus.RUNNING, MissionExecStatus.SUCCEEDED, RunTrigger.COMPLETE),
+        (RunStatus.PENDING, MissionExecStatus.FAILED, RunTrigger.FAIL),
+        (RunStatus.DISPATCHED, MissionExecStatus.CANCELLED, RunTrigger.CANCEL),
+    ],
+)
+def test_a_robot_report_maps_onto_one_trigger(current, exec_status, expected) -> None:
+    assert trigger_for_report(current, exec_status) is expected
+
+
+def test_only_terminal_reports_are_outcomes() -> None:
+    assert is_outcome(MissionExecStatus.SUCCEEDED)
+    assert is_outcome(MissionExecStatus.FAILED)
+    assert is_outcome(MissionExecStatus.CANCELLED)
+    assert not is_outcome(MissionExecStatus.RUNNING)
+    assert not is_outcome(MissionExecStatus.PAUSED)

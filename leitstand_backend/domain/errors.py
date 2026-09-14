@@ -1,5 +1,7 @@
-"""Domain-level errors. Raised by services + adapters at boundaries;
-caught by routers and translated to HTTP status codes."""
+"""Errors raised when a rule refuses an action or a dependency did not answer.
+
+The caller decides how to report each one.
+"""
 
 from enum import Enum
 from uuid import UUID

@@ -1,9 +1,10 @@
-"""Run lifecycle state machine: explicit transition table + transition helper."""
+"""Run lifecycle: the transition table, its helpers, and the trigger a robot report means."""
 
 from enum import Enum
 from typing import Final
 
 from leitstand_backend.domain.errors import InvalidMissionTransition
+from leitstand_backend.domain.model.mission.mission_state import MissionExecStatus
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 
 
@@ -128,3 +129,31 @@ def is_executing(state: RunStatus) -> bool:
 def is_active(state: RunStatus) -> bool:
     """Return True while the run occupies its robot and counts against the mission."""
     return state in ACTIVE_STATES
+
+
+def is_outcome(exec_status: MissionExecStatus) -> bool:
+    """True when a report says how the run ended rather than that it is still going."""
+    return exec_status in (
+        MissionExecStatus.SUCCEEDED,
+        MissionExecStatus.FAILED,
+        MissionExecStatus.CANCELLED,
+    )
+
+
+def trigger_for_report(current: RunStatus, exec_status: MissionExecStatus) -> RunTrigger | None:
+    """Map the robot's execution status onto a lifecycle trigger, or None.
+
+    The robot is authoritative for how a run is going and how it ended, so an outcome applies
+    from any live state and the transition table alone decides whether it does.
+    """
+    if exec_status is MissionExecStatus.SUCCEEDED:
+        return RunTrigger.COMPLETE
+    if exec_status is MissionExecStatus.FAILED:
+        return RunTrigger.FAIL
+    if exec_status is MissionExecStatus.CANCELLED:
+        return RunTrigger.CANCEL
+    if exec_status is MissionExecStatus.RUNNING:
+        return RunTrigger.RESUME if current is RunStatus.PAUSED else RunTrigger.ACK
+    if exec_status is MissionExecStatus.PAUSED:
+        return RunTrigger.PAUSE
+    return None

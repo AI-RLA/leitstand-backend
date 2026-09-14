@@ -15,7 +15,7 @@ class Field(BaseModel):
     name: str
     geometry: Polygon
     area_ha: float | None = PField(
-        description="Computed by Postgres from geometry; null for empty or degenerate polygons"
+        description="Derived from the geometry; null for an empty or degenerate polygon"
     )
     notes: str | None = None
     created_at: datetime

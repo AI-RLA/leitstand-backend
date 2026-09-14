@@ -11,13 +11,14 @@ from leitstand_backend.application.run_state_view import (
 from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_state import (
     MissionError,
-    MissionExecStatus,
     MissionStateMessage,
 )
 from leitstand_backend.domain.model.mission.run_lifecycle import (
     RunTrigger,
     is_executing,
+    is_outcome,
     is_terminal,
+    trigger_for_report,
     try_next_state,
 )
 from leitstand_backend.domain.model.mission.run_status import RunStatus
@@ -33,42 +34,6 @@ from leitstand_backend.ports.outbound.event_publisher import EventPublisher
 from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
 
 logger = logging.getLogger(__name__)
-
-
-def _is_outcome(exec_status: MissionExecStatus) -> bool:
-    """True when the frame reports how the run ended rather than that it is still going."""
-    return exec_status in (
-        MissionExecStatus.SUCCEEDED,
-        MissionExecStatus.FAILED,
-        MissionExecStatus.CANCELLED,
-    )
-
-
-def _telemetry_trigger(
-    current: RunStatus,
-    exec_status: MissionExecStatus,
-) -> RunTrigger | None:
-    """Map a robot execution-status frame onto a lifecycle trigger, or None.
-
-    The robot is authoritative for how a run is going and for how it ended, so an outcome
-    applies from any live state; the transition table alone decides whether it does. A run whose intermediate frame was dropped is still ended by the frame that says so.
-    """
-    if exec_status is MissionExecStatus.SUCCEEDED:
-        return RunTrigger.COMPLETE
-
-    if exec_status is MissionExecStatus.FAILED:
-        return RunTrigger.FAIL
-
-    if exec_status is MissionExecStatus.CANCELLED:
-        return RunTrigger.CANCEL
-
-    if exec_status is MissionExecStatus.RUNNING:
-        return RunTrigger.RESUME if current is RunStatus.PAUSED else RunTrigger.ACK
-
-    if exec_status is MissionExecStatus.PAUSED:
-        return RunTrigger.PAUSE
-
-    return None
 
 
 def _live_records(state: MissionStateMessage, stages: list[Stage]) -> list[StageStateRecord]:
@@ -140,9 +105,9 @@ class MissionStateService(MissionStateUseCase):
         current_status = run.status
         transition: tuple[RunStatus, RunTrigger] | None = None
         failure_errors: list[MissionError] | None = None
-        trigger = _telemetry_trigger(current_status, state.exec_status)
+        trigger = trigger_for_report(current_status, state.exec_status)
         target = try_next_state(current_status, trigger) if trigger is not None else None
-        if target is None and is_terminal(current_status) and not _is_outcome(state.exec_status):
+        if target is None and is_terminal(current_status) and not is_outcome(state.exec_status):
             # The robot is still working a run the backend has closed: the only dropped frame
             # worth a log line.
             logger.warning(

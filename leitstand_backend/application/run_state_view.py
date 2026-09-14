@@ -7,7 +7,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.model.mission.mission_run import MissionRun
 from leitstand_backend.domain.model.mission.mission_state import MissionError
 from leitstand_backend.domain.model.mission.run_status import RunStatus
@@ -18,7 +17,7 @@ from leitstand_backend.domain.model.mission.stage_state_record import (
     final_stage_statuses,
 )
 from leitstand_backend.domain.model.mission.stage_status import StageStatus
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher
+from leitstand_backend.ports.outbound.event_publisher import EventPublisher, mission_topic
 from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
 
 
@@ -97,7 +96,7 @@ def publish_run_state(
     the next frame; the view carries ``run_id`` so it can tell which run it is looking at.
     """
     events.publish(
-        event_topics.mission_topic(run.mission_id, "state"),
+        mission_topic(run.mission_id, "state"),
         build_run_state_view(run.run_id, run.mission_id, records, failure_errors).model_dump(
             mode="json"
         ),
