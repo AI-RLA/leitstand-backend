@@ -213,3 +213,8 @@ make migrate-revision name="add foo"  # autogenerate a new revision
 ## Contact
 
 Jannik Jose, jannik.jose@hs-osnabrueck.de
+
+## License
+
+Copyright 2026 Osnabrück University of Applied Sciences.
+Apache License 2.0, see [LICENSE](LICENSE).
