@@ -3,8 +3,11 @@ services:
     image: postgis/postgis:18-3.6
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-leitstand}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-leitstand}
       POSTGRES_DB: ${POSTGRES_DB:-leitstand}
+      # Read only when the database is first created; a new file alone does not change the password.
+      POSTGRES_PASSWORD_FILE: /run/secrets/leitstand_db_password
+    secrets:
+      - leitstand_db_password
     volumes:
       - postgres_data:/var/lib/postgresql
     ports:
@@ -29,6 +32,7 @@ services:
     build:
       context: ./coverage-planner
       dockerfile: Dockerfile
+    image: leitstand-coverage-planner:local
     ports:
       - "127.0.0.1:8090:8090"
     # The one reachable risk here is a memory-safety bug in Fields2Cover's own C++, so the
@@ -48,19 +52,33 @@ services:
       dockerfile: Dockerfile
       additional_contexts:
         contract-src: ../leitstand-robot-contract
+    image: leitstand-backend:local
+    # One settings file for the native run and the container.
+    env_file: .env
     environment:
-      LEITSTAND_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-leitstand}:${POSTGRES_PASSWORD:-leitstand}@postgres:5432/${POSTGRES_DB:-leitstand}
+      # Overrides env_file: bound to loopback, the container would be unreachable.
+      LEITSTAND_HTTP_HOST: 0.0.0.0
+      LEITSTAND_HTTP_PORT: "8080"
+      # The password comes from the leitstand_db_password secret.
+      LEITSTAND_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-leitstand}@postgres:5432/${POSTGRES_DB:-leitstand}
       LEITSTAND_ZENOH_ENDPOINT: tcp/zenoh-router:7447
       LEITSTAND_AUTO_MIGRATE: "true"
       LEITSTAND_COVERAGE_PLANNER_URL: http://coverage-planner:8090
+    secrets:
+      - leitstand_llm_api_key
+      - leitstand_auth_bearer_token
+      - leitstand_db_password
     ports:
-      - "8080:8080"
+      - "${BACKEND_BIND_ADDR:-127.0.0.1}:8080:8080"
+    networks:
+      - default
+      - leitstand
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # No dependency on the planner, deliberately: a planner that is down or still building must
-    # cost coverage planning and nothing else.
+    # No dependency on the planner: a planner that is down or still building must cost coverage
+    # planning and nothing else.
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,5 +86,18 @@ services:
         condition: service_started
     restart: unless-stopped
 
+secrets:
+  leitstand_llm_api_key:
+    file: ./secrets/leitstand_llm_api_key
+  leitstand_auth_bearer_token:
+    file: ./secrets/leitstand_auth_bearer_token
+  leitstand_db_password:
+    file: ./secrets/leitstand_db_password
+
 volumes:
   postgres_data:
+
+networks:
+  default: {}
+  leitstand:
+    name: leitstand

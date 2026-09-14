@@ -85,12 +85,12 @@ async def test_dispatch_happy_path_records_get_call():
     adapter = ZenohMissionDispatcherAdapter(session=session)
     mission = _mission()
 
-    await adapter.dispatch(mission, ROBOT_ID)
+    await adapter.dispatch(mission.mission_id, mission.stages, ROBOT_ID)
 
     session.get.assert_called_once()
     call = session.get.call_args
     assert call.args[0] == f"leitstand/robot/{ROBOT_ID}/mission/_action/send_goal"
-    assert b'"mission_id"' in call.kwargs["payload"]
+    assert b'"run_id"' in call.kwargs["payload"]
     assert call.kwargs["timeout"] > 0
 
 
@@ -101,8 +101,8 @@ async def test_dispatch_empty_replies_raises_timeout():
     mission = _mission()
 
     with pytest.raises(MissionDispatchTimeout) as excinfo:
-        await adapter.dispatch(mission, ROBOT_ID)
-    assert excinfo.value.mission_id == mission.mission_id
+        await adapter.dispatch(mission.mission_id, mission.stages, ROBOT_ID)
+    assert excinfo.value.run_id == mission.mission_id
 
 
 @pytest.mark.asyncio
@@ -112,7 +112,7 @@ async def test_dispatch_robot_reject_raises_with_reason():
     mission = _mission()
 
     with pytest.raises(MissionRejectedByRobot) as excinfo:
-        await adapter.dispatch(mission, ROBOT_ID)
+        await adapter.dispatch(mission.mission_id, mission.stages, ROBOT_ID)
     assert excinfo.value.reason == "unknown site"
 
 
@@ -122,7 +122,7 @@ async def test_dispatch_malformed_reply_then_accept_succeeds():
     adapter = ZenohMissionDispatcherAdapter(session=session)
     mission = _mission()
 
-    await adapter.dispatch(mission, ROBOT_ID)
+    await adapter.dispatch(mission.mission_id, mission.stages, ROBOT_ID)
     session.get.assert_called_once()
 
 
@@ -133,7 +133,7 @@ async def test_dispatch_all_replies_malformed_raises_timeout():
     mission = _mission()
 
     with pytest.raises(MissionDispatchTimeout):
-        await adapter.dispatch(mission, ROBOT_ID)
+        await adapter.dispatch(mission.mission_id, mission.stages, ROBOT_ID)
 
 
 @pytest.mark.asyncio
@@ -141,7 +141,7 @@ async def test_dispatch_skips_error_reply_and_accepts_next():
     session = _session_returning([_reply_with_error(), _accept_reply()])
     adapter = ZenohMissionDispatcherAdapter(session=session)
 
-    await adapter.dispatch(_mission(), ROBOT_ID)
+    await adapter.dispatch(uuid4(), _mission().stages, ROBOT_ID)
 
 
 # ---------------------------------------------------------------------------

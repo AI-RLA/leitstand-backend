@@ -2,49 +2,55 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from uuid import UUID
 
-from leitstand_backend.domain.model.mission.mission import Mission
+from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 
 
 class FakeMissionDispatcher(MissionDispatcher):
-    """In-memory dispatcher that records calls and can be told to reject or time out.
+    """In-memory dispatcher that records calls and can be told to reject, time out, or wait.
 
-    Use :meth:`set_dispatch_handler` to inject custom dispatch behaviour
-    (e.g. raise ``MissionRejectedByRobot``) for specific test scenarios.
+    Use :meth:`set_dispatch_handler` to inject custom dispatch behaviour (e.g. raise
+    ``MissionRejectedByRobot``). Set :attr:`gate` to an :class:`asyncio.Event` to hold the
+    dispatch RPC open until a test releases it, which is how a cancel arriving mid-dispatch
+    is exercised.
     """
 
     def __init__(self) -> None:
-        self.dispatched: list[tuple[Mission, str]] = []
+        self.dispatched: list[tuple[UUID, list[Stage], str]] = []
         self.cancelled: list[tuple[UUID, str, CancelMode]] = []
         self.paused: list[tuple[UUID, str]] = []
         self.resumed: list[tuple[UUID, str]] = []
-        self._dispatch_handler: Callable[[Mission, str], Awaitable[None]] | None = None
+        self.gate: asyncio.Event | None = None
+        self._dispatch_handler: Callable[[UUID, list[Stage], str], Awaitable[None]] | None = None
 
     def set_dispatch_handler(
         self,
-        handler: Callable[[Mission, str], Awaitable[None]],
+        handler: Callable[[UUID, list[Stage], str], Awaitable[None]] | None,
     ) -> None:
         self._dispatch_handler = handler
 
-    async def dispatch(self, mission: Mission, robot_id: str) -> None:
-        self.dispatched.append((mission, robot_id))
+    async def dispatch(self, run_id: UUID, stages: list[Stage], robot_id: str) -> None:
+        self.dispatched.append((run_id, stages, robot_id))
+        if self.gate is not None:
+            await self.gate.wait()
         if self._dispatch_handler is not None:
-            await self._dispatch_handler(mission, robot_id)
+            await self._dispatch_handler(run_id, stages, robot_id)
 
     async def cancel(
         self,
-        mission_id: UUID,
+        run_id: UUID,
         robot_id: str,
         mode: CancelMode = CancelMode.GRACEFUL,
     ) -> None:
-        self.cancelled.append((mission_id, robot_id, mode))
+        self.cancelled.append((run_id, robot_id, mode))
 
-    async def pause(self, mission_id: UUID, robot_id: str) -> None:
-        self.paused.append((mission_id, robot_id))
+    async def pause(self, run_id: UUID, robot_id: str) -> None:
+        self.paused.append((run_id, robot_id))
 
-    async def resume(self, mission_id: UUID, robot_id: str) -> None:
-        self.resumed.append((mission_id, robot_id))
+    async def resume(self, run_id: UUID, robot_id: str) -> None:
+        self.resumed.append((run_id, robot_id))

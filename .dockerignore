@@ -23,5 +23,6 @@ Makefile
 CLAUDE.md
 .env
 .env.local
+secrets/
 *.log
 .claude/

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -20,16 +20,11 @@ class FakeReadModel(RobotStatusReadModel):
     def __init__(
         self,
         statuses: dict[str, RobotStatus | None],
-        assignments: dict[UUID, str] | None = None,
         raises_for: set[str] | None = None,
     ) -> None:
         self._statuses = statuses
-        self._assignments = assignments or {}
         self._raises_for = raises_for or set()
         self.compute_calls: list[str] = []
-
-    async def assigned_robot(self, mission_id: UUID) -> str | None:
-        return self._assignments.get(mission_id)
 
     async def compute_status(self, robot_id: str) -> RobotStatus | None:
         self.compute_calls.append(robot_id)
@@ -71,17 +66,24 @@ async def test_registry_event_publishes_status() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_event_resolves_robot_via_read_model() -> None:
+async def test_lifecycle_event_names_its_robot() -> None:
+    """The run's robot need not be the mission's default, so the event carries it."""
     bus = EventBus()
     mission_id = uuid4()
-    rm = FakeReadModel({"r2": RobotStatus.ACTIVE}, assignments={mission_id: "r2"})
+    rm = FakeReadModel({"r2": RobotStatus.ACTIVE})
     proj = _projector(bus, rm)
     status_q = bus.subscribe(event_topics.robot_topic("r2", "status"))
     proj.start()
     try:
         bus.publish(
             event_topics.mission_topic(mission_id, "lifecycle"),
-            {"mission_id": str(mission_id), "status": "DISPATCHED", "trigger": "dispatch"},
+            {
+                "mission_id": str(mission_id),
+                "run_id": str(uuid4()),
+                "robot_id": "r2",
+                "status": "DISPATCHED",
+                "trigger": "accept",
+            },
             latch=False,
         )
         event = await _next_status(status_q)
@@ -122,7 +124,7 @@ async def test_publish_on_change_suppresses_duplicate() -> None:
 async def test_non_lifecycle_mission_topic_is_ignored() -> None:
     bus = EventBus()
     mission_id = uuid4()
-    rm = FakeReadModel({"r2": RobotStatus.ACTIVE}, assignments={mission_id: "r2"})
+    rm = FakeReadModel({"r2": RobotStatus.ACTIVE})
     proj = _projector(bus, rm)
     status_q = bus.subscribe("events/robot")
     proj.start()
@@ -131,7 +133,13 @@ async def test_non_lifecycle_mission_topic_is_ignored() -> None:
         bus.publish(event_topics.mission_topic(mission_id, "state"), {"x": 1}, latch=False)
         bus.publish(
             event_topics.mission_topic(mission_id, "lifecycle"),
-            {"mission_id": str(mission_id), "status": "DISPATCHED", "trigger": "dispatch"},
+            {
+                "mission_id": str(mission_id),
+                "run_id": str(uuid4()),
+                "robot_id": "r2",
+                "status": "DISPATCHED",
+                "trigger": "accept",
+            },
             latch=False,
         )
         event = await _next_status(status_q)

@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from leitstand_backend.domain.model.mission.mission import MissionStatus, Stage
+from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_state import MissionError
+from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.mission.stage_status import StageStatus
 
 _STAGE_ID_REF_KEY = "stage_id"
 
+# Who set a stage's status: the robot reported it, or the backend projected it because the
+# run ended before the robot reported that stage.
+StatusSource = Literal["robot", "backend"]
+
 
 class StageStateRecord(BaseModel):
-    """One mission stage's current runtime state, persisted per ``(mission_id, stage_id)``.
+    """One stage's current runtime state within a run, persisted per ``(run_id, stage_id)``.
 
     Distinct from the stage *definition* (waypoints/kind, on the mission): this is the
     *runtime* view. ``header_id`` is the robot's monotone per-frame counter and orders
@@ -32,13 +39,14 @@ class StageStateRecord(BaseModel):
     ended_at: datetime | None = None
     result: dict[str, str] | None = None
     source_ts: datetime
+    status_source: StatusSource = "robot"
 
 
-def _project_status(status: StageStatus, mission_status: MissionStatus) -> StageStatus:
-    """Project one stage's live status onto its final status given the mission outcome."""
-    if mission_status is MissionStatus.SUCCEEDED:
+def _project_status(status: StageStatus, run_status: RunStatus) -> StageStatus:
+    """Project one stage's live status onto its final status given the run's outcome."""
+    if run_status is RunStatus.SUCCEEDED:
         return StageStatus.FINISHED
-    # The mission ended on FAILED or CANCELLED.
+    # The run ended on FAILED, CANCELLED or REJECTED.
     if status is StageStatus.FINISHED:
         return StageStatus.FINISHED
     if status is StageStatus.FAILED:
@@ -47,31 +55,50 @@ def _project_status(status: StageStatus, mission_status: MissionStatus) -> Stage
         return StageStatus.SKIPPED
     # An in-flight stage (INITIALIZING / RUNNING / PAUSED) inherits the mission's reason:
     # a commanded cancel makes it CANCELLED, anything else a genuine failure.
-    return (
-        StageStatus.CANCELLED if mission_status is MissionStatus.CANCELLED else StageStatus.FAILED
-    )
+    return StageStatus.CANCELLED if run_status is RunStatus.CANCELLED else StageStatus.FAILED
+
+
+def waiting_stage_statuses(stages: Sequence[Stage], when: datetime) -> list["StageStateRecord"]:
+    """Project every stage as WAITING, for a run that has reported nothing yet.
+
+    A run exists before its robot has said anything, and a caller asking for its state wants the
+    plan it is about to drive rather than an empty list.
+    """
+    return [
+        StageStateRecord(
+            stage_id=stage.stage_id,
+            stage_index=index,
+            status=StageStatus.WAITING,
+            source_ts=when,
+            status_source="backend",
+        )
+        for index, stage in enumerate(stages)
+    ]
 
 
 def final_stage_statuses(
     stages: list[Stage],
     live_by_id: dict[UUID, StageStateRecord],
-    mission_status: MissionStatus,
+    run_status: RunStatus,
     now: datetime,
 ) -> list[StageStateRecord]:
-    """Resolve every defined stage's final status when a mission reaches a terminal state.
+    """Resolve every defined stage's final status when a run reaches a terminal state.
 
-    The stage definitions are the authoritative spine: each is matched to its live
-    record by ``stage_id`` (or defaulted to WAITING when none was reported) and
-    projected via :func:`_project_status`, so the result is correct regardless of how
-    much a producer reported. A stage that started and reached a terminal end records
-    when it stopped; a skipped or never-started stage keeps ``ended_at = None`` and so
-    carries no spurious duration.
+    The stage definitions are the spine: each is matched to its live record by ``stage_id``
+    (WAITING when none was reported) and projected by :func:`_project_status`, so the result
+    is complete however much the robot reported. A never-started stage keeps ``ended_at = None``,
+    so it shows no duration.
     """
     resolved: list[StageStateRecord] = []
     for index, stage in enumerate(stages):
         live = live_by_id.get(stage.stage_id)
         current = live.status if live is not None else StageStatus.WAITING
-        final = _project_status(current, mission_status)
+        final = _project_status(current, run_status)
+        # A status the robot reported keeps its source; one the projection changed, or set for a
+        # stage never reported, is marked as the backend's.
+        source: StatusSource = (
+            live.status_source if live is not None and final is live.status else "backend"
+        )
         started_at = live.started_at if live is not None else None
         ended_at = live.ended_at if live is not None else None
         if ended_at is None and started_at is not None and final is not StageStatus.SKIPPED:
@@ -87,6 +114,7 @@ def final_stage_statuses(
                 ended_at=ended_at,
                 result=live.result if live is not None else None,
                 source_ts=now,
+                status_source=source,
             )
         )
     return resolved

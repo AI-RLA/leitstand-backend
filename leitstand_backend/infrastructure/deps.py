@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,6 +17,9 @@ from leitstand_backend.adapters.outbound.persistence.postgres.field_repository_a
 from leitstand_backend.adapters.outbound.persistence.postgres.mission_repository_adapter import (
     PostgresMissionRepositoryAdapter,
 )
+from leitstand_backend.adapters.outbound.persistence.postgres.mission_run_repository_adapter import (
+    PostgresMissionRunRepositoryAdapter,
+)
 from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_adapter import (
     PostgresRobotRepositoryAdapter,
 )
@@ -26,14 +30,21 @@ from leitstand_backend.application.coverage_planning_service import CoveragePlan
 from leitstand_backend.application.field_management_service import FieldManagementService
 from leitstand_backend.application.fleet_view_service import FleetViewService
 from leitstand_backend.application.mission_management_service import MissionManagementService
+from leitstand_backend.application.run_service import RunService
 from leitstand_backend.application.site_management_service import SiteManagementService
 from leitstand_backend.application.tool_call_approval_service import ToolCallApprovalService
-from leitstand_backend.domain.errors import MissionDispatchTimeout, MissionRejectedByRobot
+from leitstand_backend.domain.errors import (
+    MissionDispatchFailed,
+    MissionDispatchTimeout,
+    MissionRejectedByRobot,
+)
 from leitstand_backend.domain.model.audit import (
+    ACTOR_HUMAN,
     AUTHORITY_APPROVED_PROPOSAL,
     AUTHORITY_AUTONOMOUS,
 )
-from leitstand_backend.domain.model.mission.mission import Mission
+from leitstand_backend.domain.model.mission.mission_run import MissionRun, RunOrigin
+from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.user import User
 from leitstand_backend.infrastructure.auth import authenticate
 from leitstand_backend.infrastructure.db import (
@@ -53,9 +64,12 @@ from leitstand_backend.infrastructure.transactional_events import TransactionBou
 from leitstand_backend.ports.inbound.coverage_planning import CoveragePlanningUseCase
 from leitstand_backend.ports.inbound.field_management import FieldManagementUseCase
 from leitstand_backend.ports.inbound.fleet_view import FleetViewUseCase
-from leitstand_backend.ports.inbound.mission_management import (
-    DispatchMissionCommand,
-    MissionManagementUseCase,
+from leitstand_backend.ports.inbound.mission_management import MissionManagementUseCase
+from leitstand_backend.ports.inbound.run_management import (
+    DispatchOutcome,
+    RunManagementUseCase,
+    SettleRunCommand,
+    StartRunCommand,
 )
 from leitstand_backend.ports.inbound.site_management import SiteManagementUseCase
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
@@ -64,6 +78,7 @@ from leitstand_backend.ports.outbound.event_publisher import EventPublisher
 from leitstand_backend.ports.outbound.field_repository import FieldRepository
 from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatcher
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
+from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
 from leitstand_backend.ports.outbound.robot_factsheet_view import RobotFactsheetView
 from leitstand_backend.ports.outbound.robot_repository import RobotRepository
 from leitstand_backend.ports.outbound.robot_state_view import RobotStateView
@@ -205,7 +220,7 @@ def get_fleet_view_use_case(
     return FleetViewService(
         repo=PostgresRobotRepositoryAdapter(session),
         state_view=state_view,
-        missions=PostgresMissionRepositoryAdapter(session),
+        runs=PostgresMissionRunRepositoryAdapter(session),
         factsheets=get_factsheet_view(request),
     )
 
@@ -214,6 +229,12 @@ async def get_mission_repository(
     session: AsyncSession = Depends(get_db_session),
 ) -> MissionRepository:
     return PostgresMissionRepositoryAdapter(session)
+
+
+async def get_mission_run_repository(
+    session: AsyncSession = Depends(get_db_session),
+) -> MissionRunRepository:
+    return PostgresMissionRunRepositoryAdapter(session)
 
 
 async def get_site_repository(
@@ -232,7 +253,7 @@ def get_factsheet_view(request: Request) -> RobotFactsheetView:
 
 def get_mission_management_use_case(
     repo: MissionRepository = Depends(get_mission_repository),
-    dispatcher: MissionDispatcher = Depends(get_mission_dispatcher),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
     factsheets: RobotFactsheetView = Depends(get_factsheet_view),
     events: EventPublisher = Depends(get_transactional_event_publisher),
     audit: AuditWriter = Depends(get_audit_writer),
@@ -241,12 +262,51 @@ def get_mission_management_use_case(
 ) -> MissionManagementUseCase:
     return MissionManagementService(
         repo=repo,
-        dispatcher=dispatcher,
+        runs=runs,
         factsheets=factsheets,
         events=events,
         audit=audit,
         sites=sites,
         fields=fields,
+    )
+
+
+def get_run_management_use_case(
+    repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
+    dispatcher: MissionDispatcher = Depends(get_mission_dispatcher),
+    factsheets: RobotFactsheetView = Depends(get_factsheet_view),
+    fields: FieldRepository = Depends(get_field_repository),
+    sites: SiteRepository = Depends(get_site_repository),
+    events: EventPublisher = Depends(get_transactional_event_publisher),
+    audit: AuditWriter = Depends(get_audit_writer),
+) -> RunManagementUseCase:
+    """Run commands other than starting one, on the request's transaction.
+
+    Starting a run is the orchestrator's below: it needs two transactions around the robot RPC.
+    """
+    return RunService(
+        missions=repo,
+        runs=runs,
+        dispatcher=dispatcher,
+        factsheets=factsheets,
+        fields=fields,
+        sites=sites,
+        events=events,
+        audit=audit,
+    )
+
+
+def current_run_origin() -> RunOrigin:
+    """Who is starting this run, from the same provenance the audit row is written with."""
+    ctx = agent_origin.get()
+    if ctx is None:
+        return RunOrigin(kind="manual", actor=ACTOR_HUMAN)
+    call = tool_call_provenance.get()
+    return RunOrigin(
+        kind="agent",
+        actor=ctx.actor,
+        tool_call_id=call.tool_call_id if call is not None and call.approved else None,
     )
 
 
@@ -279,18 +339,11 @@ def get_coverage_planning_use_case(
     )
 
 
-class _DispatchOrchestrator:
-    """Runs mission dispatch in a dedicated transaction.
+class _RunStartOrchestrator:
+    """Start a run in two transactions around the robot RPC.
 
-    Dispatch waits on a robot RPC (Zenoh queryable, up to a timeout); a failure
-    (reject / timeout) marks the mission FAILED. That FAILED write must survive the
-    error propagating to the route, so dispatch cannot share the request's
-    transaction (which rolls back on the raised error). This owns its own session
-    and commits on both the success and failure paths before re-raising.
-
-    The transaction is held across the robot RPC; acceptable at fleet scale (a
-    timeout is the only slow case, and dispatch is operator-initiated). The
-    connection-releasing variant is a documented follow-up.
+    The run is committed as PENDING before the robot is asked, so a rejection, a timeout or a
+    crash mid-call all leave a durable record, and no connection is held across the RPC.
     """
 
     def __init__(
@@ -307,38 +360,75 @@ class _DispatchOrchestrator:
         self._bus = bus
         self._current_user = current_user
 
-    async def dispatch(self, command: DispatchMissionCommand) -> Mission:
+    def _service(self, session: AsyncSession) -> RunService:
+        return RunService(
+            missions=PostgresMissionRepositoryAdapter(session),
+            runs=PostgresMissionRunRepositoryAdapter(session),
+            dispatcher=self._dispatcher,
+            factsheets=self._factsheets,
+            fields=PostgresFieldRepositoryAdapter(session),
+            sites=PostgresSiteRepositoryAdapter(session),
+            events=TransactionBoundEventPublisher(session, self._bus),
+            audit=_make_audit_writer(session, self._current_user),
+        )
+
+    async def start(self, command: StartRunCommand) -> MissionRun:
         async with self._session_factory() as session:
-            service = MissionManagementService(
-                repo=PostgresMissionRepositoryAdapter(session),
-                dispatcher=self._dispatcher,
-                factsheets=self._factsheets,
-                events=TransactionBoundEventPublisher(session, self._bus),
-                audit=_make_audit_writer(session, self._current_user),
-                sites=PostgresSiteRepositoryAdapter(session),
-                fields=PostgresFieldRepositoryAdapter(session),
-            )
             try:
-                mission = await service.dispatch(command)
-            except (MissionRejectedByRobot, MissionDispatchTimeout):
-                # service.dispatch already moved the row to FAILED in this session;
-                # commit so the failure is durable, then re-raise for the HTTP mapping.
-                await session.commit()
-                run_after_commit_callbacks(session)
-                raise
+                run = await self._service(session).prepare(command)
             except Exception:
                 await session.rollback()
                 raise
             await session.commit()
             run_after_commit_callbacks(session)
-            return mission
+
+        error: Exception | None = None
+        try:
+            await self._dispatcher.dispatch(run.run_id, run.stages, run.robot_id)
+        except MissionRejectedByRobot as exc:
+            outcome, reason, error = DispatchOutcome.REJECTED, exc.reason, exc
+        except MissionDispatchTimeout as exc:
+            outcome, reason, error = DispatchOutcome.TIMEOUT, None, exc
+        except Exception as exc:  # noqa: BLE001 - any transport failure, not only Zenoh's
+            # A transport or encoding failure is not the robot's answer either, so it is named as
+            # its own failure rather than reaching the caller as an unhandled crash.
+            reason = f"{type(exc).__name__}: {exc}"
+            outcome = DispatchOutcome.ERROR
+            error = MissionDispatchFailed(run.run_id, run.robot_id, reason)
+        else:
+            outcome, reason = DispatchOutcome.ACCEPTED, None
+
+        async with self._session_factory() as session:
+            try:
+                settled = await self._service(session).settle(
+                    SettleRunCommand(
+                        run_id=run.run_id,
+                        outcome=outcome,
+                        reason=reason,
+                        replied_at=datetime.now(timezone.utc),
+                    )
+                )
+            except Exception:
+                await session.rollback()
+                raise
+            await session.commit()
+            run_after_commit_callbacks(session)
+        # The dispatch failure is reported unless the robot's own frames have already moved the run
+        # on: a run still PENDING has nothing confirming it.
+        if error is not None and settled.status in (
+            RunStatus.PENDING,
+            RunStatus.REJECTED,
+            RunStatus.FAILED,
+        ):
+            raise error
+        return settled
 
 
-def get_dispatch_use_case(
+def get_run_start_use_case(
     request: Request,
     current_user: User = Depends(get_current_user),
-) -> _DispatchOrchestrator:
-    return _DispatchOrchestrator(
+) -> _RunStartOrchestrator:
+    return _RunStartOrchestrator(
         session_factory=request.app.state.session_factory,
         dispatcher=request.app.state.mission_dispatcher,
         factsheets=request.app.state.factsheet_view,
@@ -349,9 +439,10 @@ def get_dispatch_use_case(
 
 def get_site_management_use_case(
     repo: SiteRepository = Depends(get_site_repository),
+    missions: MissionRepository = Depends(get_mission_repository),
     audit: AuditWriter = Depends(get_audit_writer),
 ) -> SiteManagementUseCase:
-    return SiteManagementService(repo=repo, audit=audit)
+    return SiteManagementService(repo=repo, missions=missions, audit=audit)
 
 
 def get_tool_call_approval_service(

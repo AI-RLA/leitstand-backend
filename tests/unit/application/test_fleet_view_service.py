@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
 
 import pytest
 
 from leitstand_backend.application.fleet_view_service import FleetViewService
-from leitstand_backend.domain.model.mission.mission import Mission, MissionStatus, NavigationStage
-from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
+from leitstand_backend.domain.model.mission.mission_run import MissionRun
+from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.robot.robot import Metadata
 from leitstand_backend.domain.model.robot.robot_factsheet import (
     NavigationCapability,
@@ -19,10 +18,11 @@ from leitstand_backend.domain.model.robot.robot_factsheet import (
 )
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
 from leitstand_backend.domain.model.robot.telemetry import Battery, Pose
-from tests.fakes.in_memory_mission_repository import InMemoryMissionRepository
+from tests.fakes.in_memory_mission_run_repository import InMemoryMissionRunRepository
 from tests.fakes.in_memory_robot_factsheet_view import InMemoryRobotFactsheetView
 from tests.fakes.in_memory_robot_repository import InMemoryRobotRepository
 from tests.fakes.in_memory_robot_state_view import InMemoryRobotStateView
+from tests.fakes.runs import mission_run
 
 _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -30,25 +30,19 @@ _NOW = datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
 def _make_svc(
     repo: InMemoryRobotRepository,
     state_view: InMemoryRobotStateView | None = None,
-    missions: InMemoryMissionRepository | None = None,
+    runs: InMemoryMissionRunRepository | None = None,
     factsheets: InMemoryRobotFactsheetView | None = None,
 ) -> FleetViewService:
     return FleetViewService(
         repo=repo,
         state_view=state_view or InMemoryRobotStateView(),
-        missions=missions or InMemoryMissionRepository(),
+        runs=runs or InMemoryMissionRunRepository(),
         factsheets=factsheets or InMemoryRobotFactsheetView(),
     )
 
 
-def _mission() -> Mission:
-    return Mission(
-        mission_id=uuid4(),
-        name="m",
-        stages=[NavigationStage(stage_id=uuid4(), waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)])],
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
+def _run(robot_id: str, status: RunStatus) -> MissionRun:
+    return mission_run(robot_id=robot_id, status=status)
 
 
 @pytest.mark.asyncio
@@ -110,33 +104,28 @@ async def test_overview_reflects_battery() -> None:
 @pytest.mark.asyncio
 async def test_status_active_when_robot_has_executing_mission() -> None:
     repo = InMemoryRobotRepository()
-    missions = InMemoryMissionRepository()
-    svc = _make_svc(repo, missions=missions)
+    runs = InMemoryMissionRunRepository()
+    svc = _make_svc(repo, runs=runs)
 
     await repo.record_online("r1", Metadata(id="r1"))
-    mission = _mission()
-    await missions.save(mission)
-    await missions.assign_robot(mission.mission_id, "r1", _NOW)
-    missions.set_status_directly(mission.mission_id, MissionStatus.RUNNING)
+    run = await runs.create(_run("r1", RunStatus.RUNNING))
 
     overview = await svc.get_robot("r1")
 
     assert overview is not None
     assert overview.status == RobotStatus.ACTIVE
+    assert overview.current_run is not None and overview.current_run.run_id == run.run_id
 
 
 @pytest.mark.asyncio
 async def test_status_offline_overrides_executing_mission() -> None:
     repo = InMemoryRobotRepository()
-    missions = InMemoryMissionRepository()
-    svc = _make_svc(repo, missions=missions)
+    runs = InMemoryMissionRunRepository()
+    svc = _make_svc(repo, runs=runs)
 
     await repo.record_online("r1", Metadata(id="r1"))
     await repo.record_offline("r1")
-    mission = _mission()
-    await missions.save(mission)
-    await missions.assign_robot(mission.mission_id, "r1", _NOW)
-    missions.set_status_directly(mission.mission_id, MissionStatus.RUNNING)
+    await runs.create(_run("r1", RunStatus.RUNNING))
 
     overview = await svc.get_robot("r1")
 

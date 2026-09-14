@@ -8,9 +8,9 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 from pydantic import Field as PField
 
-from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
-from leitstand_backend.domain.model.mission.mission import MissionStatus, Stage
-from leitstand_backend.domain.model.mission.mission_state import MissionError
+from leitstand_backend.adapters.inbound.web.runs.dto import RunSummaryView
+from leitstand_backend.domain.model.mission.mission import Stage
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.ports.inbound.mission_management import StageInput
 
 
@@ -73,12 +73,14 @@ class MissionCoverageCreate(BaseModel):
             "false only when working ground twice is worse than missing a strip."
         ),
     )
-    replaces: UUID | None = PField(
+    replan: UUID | None = PField(
         default=None,
         description=(
-            "A coverage mission over the same field that this plan supersedes; it is deleted "
-            "once the new one exists. Pass it when the operator wants an existing plan changed "
-            "rather than a second one, because a plan is re-derived rather than edited."
+            "The id of an existing coverage stage whose path should be re-planned in place, "
+            "instead of creating a new mission. Pass it when the operator wants an existing plan "
+            "changed rather than a second one: a plan is re-derived rather than edited. The "
+            "mission keeps its id, its name, its other stages and every run it has had; only that "
+            "stage's path and provenance change."
         ),
     )
 
@@ -94,19 +96,56 @@ class MissionAssignBody(BaseModel):
 
 
 class MissionDispatchBody(BaseModel):
-    robot_id: str = PField(min_length=1)
+    robot_id: str | None = PField(
+        default=None, min_length=1, description="Robot to run on; defaults to the assigned one."
+    )
+    notes: str | None = PField(default=None, max_length=4000)
+
+
+class RunSelectBody(BaseModel):
+    """Which run a mission-addressed command means; needed only when several are active."""
+
+    run_id: UUID | None = None
+
+
+class CancelBody(RunSelectBody):
+    mode: CancelMode = PField(
+        default=CancelMode.GRACEFUL,
+        description=(
+            "How the robot stops. Both stop within seconds: 'graceful' comes to a controlled stop "
+            "at the next safe point (the current motion completed, the implement raised) and then "
+            "runs the stage's on_cancel cleanup; 'immediate' stops at once, then cleans up."
+        ),
+    )
 
 
 class MissionView(BaseModel):
     mission_id: UUID
-    update_id: int
     name: str
     description: str | None
     stages: list[Stage]
-    status: MissionStatus
-    robot_id: str | None
-    dispatched_at: datetime | None
+    assigned_robot_id: str | None
+    archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
-    failure_errors: list[MissionError] | None = None
-    coverage: CoverageProvenance | None = None
+    stages_digest: str = PField(
+        description=(
+            "Digest of the stages as they stand now. A run whose stages_digest matches ran the "
+            "plan this mission currently holds; one that differs ran an older plan. Computed the "
+            "same way as a run's, so the two are directly comparable."
+        ),
+    )
+    latest_run: RunSummaryView | None = PField(
+        default=None,
+        description="The most recently created run; null means the mission has never run.",
+    )
+    active_runs: list[RunSummaryView] = PField(
+        default_factory=list,
+        description=(
+            "Every run of this mission still occupying a robot, newest first. Whether the "
+            "mission is running is this being non-empty, not the status of latest_run: a "
+            "concurrent run that ends first becomes latest_run while the other still drives. "
+            "With more than one entry, mission-addressed cancel, pause and resume require a "
+            "run_id, and these are the candidates."
+        ),
+    )

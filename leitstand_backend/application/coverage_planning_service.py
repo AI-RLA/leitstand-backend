@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from leitstand_backend.application.mission_validation import coverage_stages
 from leitstand_backend.domain.errors import (
     CoveragePlanRejected,
     FieldNotFoundError,
     FieldNotPlannable,
-    MissionNotFoundError,
+    MissionArchived,
     RobotFactsheetMissing,
     RobotPhysicalParametersMissing,
     UnsupportedStageKind,
@@ -20,17 +21,20 @@ from leitstand_backend.domain.model.mission.coverage import (
     CoverageProvenance,
     boundary_digest,
 )
-from leitstand_backend.domain.model.mission.mission import Mission, StageKind
+from leitstand_backend.domain.model.mission.mission import (
+    CoverageStage,
+    Mission,
+    Segment,
+    StageKind,
+)
 from leitstand_backend.ports.inbound.coverage_planning import (
     CoveragePlanningUseCase,
     PlanCoverageCommand,
 )
 from leitstand_backend.ports.inbound.mission_management import (
-    CoverageStageInput,
-    CreateMissionCommand,
-    DeleteMissionCommand,
+    CreateGeneratedMissionCommand,
     MissionManagementUseCase,
-    SegmentInput,
+    ReplaceGeneratedStageCommand,
 )
 from leitstand_backend.ports.outbound.coverage_planner import CoveragePlanner
 from leitstand_backend.ports.outbound.field_repository import FieldRepository
@@ -107,9 +111,6 @@ class CoveragePlanningService(CoveragePlanningUseCase):
             turn_sample_m=self._turn_sample_m,
         )
 
-        if command.replaces is not None:
-            await self._check_replaceable(command.replaces, field.id)
-
         field_area_m2 = field.area_ha * _SQUARE_METRES_PER_HECTARE
         plan = await self._planner.plan(field.geometry, params)
         # The planner picks a swath angle when the caller leaves it open, so the record of what
@@ -117,25 +118,10 @@ class CoveragePlanningService(CoveragePlanningUseCase):
         params = params.model_copy(update={"swath_angle_deg": plan.swath_angle_deg})
         _validate(plan, field_area_m2, params)
 
-        mission = await self._missions.create(
-            CreateMissionCommand(
-                # An operator who asked for a field to be covered has already said what this is,
-                # so a name is only worth demanding when they want a different one.
-                name=command.name or f"Coverage of {field.name}"[:255],
-                description=command.description,
-                stages=[
-                    CoverageStageInput(
-                        segments=[
-                            SegmentInput(kind=s.kind, waypoints=list(s.waypoints))
-                            for s in plan.segments
-                        ],
-                    )
-                ],
-            )
-        )
-        await self._repo.save_coverage_provenance(
-            mission.mission_id,
-            CoverageProvenance(
+        stage = CoverageStage(
+            stage_id=uuid4(),
+            segments=[Segment(kind=s.kind, waypoints=list(s.waypoints)) for s in plan.segments],
+            provenance=CoverageProvenance(
                 field_id=field.id,
                 boundary_digest=boundary_digest(field.geometry),
                 field_area_m2=field_area_m2,
@@ -147,30 +133,50 @@ class CoveragePlanningService(CoveragePlanningUseCase):
                 planned_at=datetime.now(timezone.utc),
             ),
         )
-        if command.replaces is not None:
-            # Through the use case rather than the repository, so the superseded mission is locked,
-            # refused while a robot is running it, and audited, and ordered after the new plan
-            # exists because on the same transaction a refusal here takes both.
-            await self._missions.delete(DeleteMissionCommand(mission_id=command.replaces))
+        if command.replan is not None:
+            # Overwriting the definition loses nothing: every run carries the stages it executed,
+            # and the stage keeps its id so its runs stay linked to it.
+            target = await self._stage_to_replan(command.replan, field.id)
+            mission = await self._missions.replace_generated_stage(
+                ReplaceGeneratedStageCommand(
+                    mission_id=target.mission_id,
+                    stage=stage.model_copy(update={"stage_id": command.replan}),
+                )
+            )
+        else:
+            mission = await self._missions.create_generated(
+                CreateGeneratedMissionCommand(
+                    # The field's name is the default; a mission name is only required when the
+                    # operator wants a different one.
+                    name=command.name or f"Coverage of {field.name}"[:255],
+                    description=command.description,
+                    stages=[stage],
+                )
+            )
         return mission
 
-    async def _check_replaceable(self, mission_id: UUID, field_id: UUID) -> None:
-        """Reject superseding anything but this field's own generated plan.
+    async def _stage_to_replan(self, stage_id: UUID, field_id: UUID) -> Mission:
+        """Return the mission owning the coverage stage being re-planned, or refuse.
 
-        A hand-authored mission is not a plan of this field that was re-derived, and neither is a
-        plan of somewhere else, so replacing either would delete work nobody asked to lose.
+        Re-planning overwrites a path, so only this field's own generated stage may be re-planned;
+        another field's plan or a hand-written stage is refused.
         """
-        record = await self._repo.get_record(mission_id)
-        if record is None:
-            raise MissionNotFoundError(mission_id)
-        if record.coverage is None:
+        mission_id = await self._repo.mission_id_for_stage(stage_id)
+        mission = await self._repo.get(mission_id) if mission_id else None
+        stage = (
+            next((s for s in coverage_stages(mission.stages) if s.stage_id == stage_id), None)
+            if mission
+            else None
+        )
+        if mission is None or stage is None:
+            raise CoveragePlanRejected(f"no coverage stage {stage_id} exists to supersede")
+        if mission.archived_at is not None:
+            raise MissionArchived(mission.mission_id)
+        if stage.provenance.field_id != field_id:
             raise CoveragePlanRejected(
-                f"mission {mission_id} was not planned from a field and cannot be superseded"
+                f"coverage stage {stage_id} covers a different field and cannot be superseded"
             )
-        if record.coverage.field_id != field_id:
-            raise CoveragePlanRejected(
-                f"mission {mission_id} covers a different field and cannot be superseded"
-            )
+        return mission
 
 
 def _validate(plan: CoveragePlan, field_area_m2: float, params: CoverageParams) -> None:

@@ -40,7 +40,7 @@ def _ts(moment: datetime) -> timestamp_pb2.Timestamp:
 
 def _frame(**overrides) -> mission_state_pb2.MissionState:
     frame = mission_state_pb2.MissionState(
-        mission_id=str(uuid4()),
+        run_id=str(uuid4()),
         header_id=7,
         timestamp=_ts(_T0),
         exec_status=mission_state_pb2.MISSION_EXEC_STATUS_RUNNING,
@@ -146,7 +146,7 @@ def test_nan_progress_from_proto_json_is_rejected_by_domain_validation() -> None
     # bounds are the layer that must refuse it.
     payload = json.dumps(
         {
-            "mission_id": str(uuid4()),
+            "run_id": str(uuid4()),
             "header_id": 1,
             "timestamp": "2026-01-01T12:00:00Z",
             "exec_status": "MISSION_EXEC_STATUS_RUNNING",

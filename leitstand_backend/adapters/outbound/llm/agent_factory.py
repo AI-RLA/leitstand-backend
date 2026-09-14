@@ -164,7 +164,7 @@ def _build_model(settings: Settings) -> OpenAIChatModel:
     )
     openai_client = AsyncOpenAI(
         base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key or "not-needed",
+        api_key=settings.llm_api_key.get_secret_value() if settings.llm_api_key else "not-needed",
         http_client=http_client,
         max_retries=0,
     )

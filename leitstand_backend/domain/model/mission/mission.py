@@ -1,5 +1,6 @@
-"""Mission, Stage hierarchy, and the mission-lifecycle / stage-kind enums."""
+"""Mission definition: the Stage hierarchy and the Mission that orders it."""
 
+from collections.abc import Sequence
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -7,20 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, Waypoint
-
-
-class MissionStatus(str, Enum):
-    """Lifecycle state of a Mission as tracked by the backend."""
-
-    DRAFT = "DRAFT"
-    ASSIGNED = "ASSIGNED"
-    DISPATCHED = "DISPATCHED"
-    RUNNING = "RUNNING"
-    PAUSED = "PAUSED"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
 
 
 class StageKind(str, Enum):
@@ -76,7 +65,12 @@ class Segment(BaseModel):
 
 
 class CoverageStage(MissionStageBase):
-    """Cover a field by driving its swaths in order, each reached by the turn before it."""
+    """Cover a field by driving its swaths in order, each reached by the turn before it.
+
+    Provenance is required, so this stage cannot be written by hand: swaths come from the
+    planner, and the checks that refuse a robot which would cut the corners read the parameters
+    the plan was made with.
+    """
 
     kind: Literal["coverage"] = "coverage"
     segments: list[Segment] = Field(
@@ -87,9 +81,55 @@ class CoverageStage(MissionStageBase):
             "segments share an endpoint, which a receiver joining them skips."
         ),
     )
+    provenance: CoverageProvenance = Field(
+        description="The inputs, measurements and act that produced these segments."
+    )
 
 
 Stage = Annotated[NavigationStage | CoverageStage, Field(discriminator="kind")]
+
+
+def stage_ids(stages: Sequence["Stage"]) -> set[UUID]:
+    """Every stage's id, cleanup stages included."""
+    found: set[UUID] = set()
+    for stage in stages:
+        found.add(stage.stage_id)
+        if stage.on_cancel:
+            found |= stage_ids(stage.on_cancel)
+    return found
+
+
+def replace_stage(stages: list["Stage"], replacement: "Stage") -> tuple[list["Stage"], bool]:
+    """Return ``stages`` with the stage carrying ``replacement``'s id swapped for it.
+
+    Cleanup stages are searched too.
+    """
+    found = False
+    out: list["Stage"] = []
+    for stage in stages:
+        if stage.stage_id == replacement.stage_id:
+            out.append(replacement)
+            found = True
+            continue
+        if stage.on_cancel:
+            nested, nested_found = replace_stage(stage.on_cancel, replacement)
+            if nested_found:
+                stage = stage.model_copy(update={"on_cancel": nested})
+                found = True
+        out.append(stage)
+    return out, found
+
+
+def referenced_site_ids(stages: list[Stage]) -> set[UUID]:
+    """Return every site a stage drives in, cleanup stages included."""
+    ids: set[UUID] = set()
+    for stage in stages:
+        for waypoint in stage_waypoints(stage):
+            if isinstance(waypoint, SiteLocalWaypoint):
+                ids.add(waypoint.site_id)
+        if stage.on_cancel:
+            ids.update(referenced_site_ids(stage.on_cancel))
+    return ids
 
 
 def stage_waypoints(stage: Any) -> list[Waypoint]:
@@ -116,35 +156,17 @@ CoverageStage.model_rebuild()
 
 
 class Mission(BaseModel):
-    """A mission: an ordered sequence of stages dispatched to a single robot."""
+    """A mission definition: an ordered sequence of stages that can be run any number of times.
+
+    Execution lives on :class:`MissionRun`. ``assigned_robot_id`` is the default robot a run goes
+    to when the dispatch names none; a run records the robot it actually went to.
+    """
 
     mission_id: UUID
-    update_id: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Monotone counter for mid-execution mission updates. Always 0 until "
-            "stitching support lands."
-        ),
-    )
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     stages: list[Stage] = Field(min_length=1)
+    assigned_robot_id: str | None = None
+    archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
-
-
-def referenced_site_ids(stages: list[Stage]) -> set[UUID]:
-    """Site ids referenced by ``site_local`` waypoints anywhere in ``stages``.
-
-    Recurses into ``on_cancel`` cleanup stages (which may themselves nest), so a
-    site referenced only inside a cleanup branch is still captured.
-    """
-    ids: set[UUID] = set()
-    for stage in stages:
-        for waypoint in stage_waypoints(stage):
-            if isinstance(waypoint, SiteLocalWaypoint):
-                ids.add(waypoint.site_id)
-        if stage.on_cancel:
-            ids.update(referenced_site_ids(stage.on_cancel))
-    return ids

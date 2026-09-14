@@ -1,12 +1,12 @@
 """Contract test: keep the in-house mission pydantic and the robot proto aligned.
 
-Shape-agnostic by design. The proto-JSON shape (oneof member keys, enum names,
-RFC3339 timestamps) deliberately differs from the pydantic/OpenAPI shape, so
-this is not a schema diff. A canonical corpus of domain objects must round-trip
-losslessly through each projection, and a negative corpus of malformed
-proto-JSON must be rejected by the strict parser.
+Shape-agnostic: the proto-JSON shape (oneof member keys, enum names, RFC3339
+timestamps) differs from the pydantic/OpenAPI shape, so this is not a schema diff.
+A canonical corpus of domain objects must round-trip losslessly through each
+projection, and a negative corpus of malformed proto-JSON must be rejected by the
+strict parser.
 
-The proto wire carries only the mission projection ({mission_id, stages});
+The proto wire carries only the run projection ({run_id, stages});
 backend bookkeeping (name, timestamps) never crosses it, so the ACL round-trip
 asserts projection equality, never full-Mission equality.
 """
@@ -22,8 +22,8 @@ from google.protobuf import json_format
 from leitstand.robot.v1 import mission_pb2
 
 from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_mappers import (
-    mission_projection_from_proto,
-    mission_to_proto,
+    run_projection_from_proto,
+    run_to_proto,
 )
 from leitstand_backend.domain.model.mission.mission import Mission, NavigationStage
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
@@ -100,7 +100,7 @@ def test_pydantic_roundtrip(mission: Mission) -> None:
 @pytest.mark.parametrize("mission", _examples())
 def test_roundtrip_via_acl(mission: Mission) -> None:
     """domain -> proto -> domain (through the named-field ACL) is projection-lossless."""
-    mission_id, stages = mission_projection_from_proto(mission_to_proto(mission))
+    mission_id, stages = run_projection_from_proto(run_to_proto(mission.mission_id, mission.stages))
     assert mission_id == mission.mission_id
     assert stages == mission.stages
 
@@ -108,10 +108,10 @@ def test_roundtrip_via_acl(mission: Mission) -> None:
 @pytest.mark.parametrize("mission", _examples())
 def test_proto_json_roundtrip(mission: Mission) -> None:
     """domain -> proto -> proto-JSON -> proto -> domain survives the actual wire format."""
-    proto = mission_to_proto(mission)
+    proto = run_to_proto(mission.mission_id, mission.stages)
     wire = json_format.MessageToJson(proto, preserving_proto_field_name=True)
     parsed = json_format.Parse(wire, mission_pb2.Mission(), ignore_unknown_fields=False)
-    assert mission_projection_from_proto(parsed) == (mission.mission_id, mission.stages)
+    assert run_projection_from_proto(parsed) == (mission.mission_id, mission.stages)
 
 
 @pytest.mark.parametrize("mission", _examples())
@@ -122,7 +122,7 @@ def test_proto_satisfies_protovalidate(mission: Mission) -> None:
     heading range mismatch): a value the domain accepts must not be one the proto's
     own validator rejects.
     """
-    protovalidate.validate(mission_to_proto(mission))
+    protovalidate.validate(run_to_proto(mission.mission_id, mission.stages))
 
 
 def test_protovalidate_rejects_out_of_range_heading() -> None:
@@ -132,7 +132,7 @@ def test_protovalidate_rejects_out_of_range_heading() -> None:
     actually enforced -- a missing or widened constraint would let -90 through.
     """
     mission = mission_pb2.Mission(
-        mission_id=str(uuid4()),
+        run_id=str(uuid4()),
         stages=[
             mission_pb2.Stage(
                 stage_id=str(uuid4()),
@@ -152,11 +152,12 @@ def test_protovalidate_rejects_out_of_range_heading() -> None:
 
 
 _NEGATIVE_CORPUS = [
-    '{"mission_id":"m","stagez":[]}',  # renamed structural field
-    '{"mission_id":"m","stages":[{"stage_id":"s","waypoints":[]}]}',  # field on wrong level
+    '{"run_id":"m","stagez":[]}',  # renamed structural field
+    '{"mission_id":"m","stages":[]}',  # the pre-0.3.0 name: a stale robot must fail loudly
+    '{"run_id":"m","stages":[{"stage_id":"s","waypoints":[]}]}',  # field on wrong level
     # Unknown enum name. The value must be one the contract does not define, so it changes when a
     # kind is added; COVERAGE lived here until it became real.
-    '{"mission_id":"m","stages":[{"stage_id":"s","kind":"STAGE_KIND_SPRAYING"}]}',
+    '{"run_id":"m","stages":[{"stage_id":"s","kind":"STAGE_KIND_SPRAYING"}]}',
 ]
 
 

@@ -321,7 +321,7 @@
           "missions"
         ],
         "summary": "List Missions",
-        "description": "List missions newest first, each with its lifecycle status and assigned robot.\n\nStatus is one of DRAFT, ASSIGNED, DISPATCHED, RUNNING, PAUSED, SUCCEEDED, FAILED or\nCANCELLED. Optionally filter by robot, by name, or both. This returns mission definitions and\nstatus, not live per-stage progress: use get_mission_state for that.",
+        "description": "List missions newest first, each with its latest run.\n\nA mission is a definition that can be run any number of times; ``latest_run`` carries the\nstatus, robot and timings of its most recent run and is null when it has never run. Its\nstatus is one of PENDING, DISPATCHED, RUNNING, PAUSED, SUCCEEDED, FAILED, CANCELLED or\nREJECTED. Optionally filter by robot, by name, or both. This returns definitions, not live\nper-stage progress: use get_mission_state for that.",
         "operationId": "list_missions",
         "parameters": [
           {
@@ -337,10 +337,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter to missions assigned to this robot id.",
+              "description": "Filter to missions whose default robot is this robot id.",
               "title": "Robot"
             },
-            "description": "Filter to missions assigned to this robot id."
+            "description": "Filter to missions whose default robot is this robot id."
           },
           {
             "name": "name",
@@ -359,6 +359,18 @@
               "title": "Name"
             },
             "description": "Filter to missions with exactly this name, matched case-insensitively."
+          },
+          {
+            "name": "include_archived",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also return archived missions.",
+              "default": false,
+              "title": "Include Archived"
+            },
+            "description": "Also return archived missions."
           }
         ],
         "responses": {
@@ -393,7 +405,7 @@
           "missions"
         ],
         "summary": "Create Mission",
-        "description": "Create a mission from a name and an ordered list of navigation stages.\n\nEvery waypoint must be a coordinate the operator stated. Do not compute one: not from a field\nor site boundary, not from a robot's current position, and not by converting a distance in\nmetres into degrees. If you were given an area, a row spacing or a bearing rather than\ncoordinates, do not call this: use plan_coverage_mission for a field that should be covered, and\notherwise say you cannot work the coordinates out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is created as a draft and is not\ndispatched.",
+        "description": "Create a mission from a name and an ordered list of navigation stages.\n\nEvery waypoint must be a coordinate the operator stated. Do not compute one: not from a field\nor site boundary, not from a robot's current position, and not by converting a distance in\nmetres into degrees. If you were given an area, a row spacing or a bearing rather than\ncoordinates, do not call this: use plan_coverage_mission for a field that should be covered, and\notherwise say you cannot work the coordinates out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is a definition and is not\ndispatched; dispatch_mission runs it, as many times as wanted.",
         "operationId": "create_mission",
         "requestBody": {
           "required": true,
@@ -435,7 +447,7 @@
           "missions"
         ],
         "summary": "Get Mission",
-        "description": "Return one mission's definition, lifecycle status and assigned robot.\n\nIdentify the mission by mission_id from list_missions, which is also how a mission named by\nthe operator is resolved.",
+        "description": "Return one mission's definition, default robot and latest run.\n\nIdentify the mission by mission_id from list_missions, which is also how a mission named by\nthe operator is resolved. Its run history is list_mission_runs.",
         "operationId": "get_mission",
         "parameters": [
           {
@@ -477,7 +489,7 @@
           "missions"
         ],
         "summary": "Update Mission",
-        "description": "Change a draft mission's name, description, or stages.\n\nOnly a mission still in DRAFT can be updated. Identify it by mission_id from list_missions.\nSupplying stages replaces the existing ones, which a planned mission refuses: re-plan it.",
+        "description": "Change a mission's name, description, or stages.\n\nAllowed at any time, even while a run is active: a run carries its own copy of the plan, so\nediting the definition never changes what a run did or is doing. Identify the mission by\nmission_id from list_missions. Supplying stages replaces the existing ones; a stage that\ncarries its stage_id keeps its identity across the edit, one without gets a new id, and one\nleft out is removed. A planned coverage stage is carried by its stage_id alone; its path\ncannot be written here, only re-planned.",
         "operationId": "update_mission",
         "parameters": [
           {
@@ -529,7 +541,7 @@
           "missions"
         ],
         "summary": "Delete Mission",
-        "description": "Delete a mission permanently.\n\nOnly a draft or already-finished mission can be deleted, and this cannot be undone. Identify\nthe mission by mission_id from list_missions.",
+        "description": "Delete a mission that never ran, or archive one that did.\n\nA mission with runs is archived rather than deleted: it leaves the list, its runs stay\nreadable, and restore_mission brings it back. A mission with a run in progress is refused.\nIdentify the mission by mission_id from list_missions.",
         "operationId": "delete_mission",
         "parameters": [
           {
@@ -566,7 +578,7 @@
           "missions"
         ],
         "summary": "Get Mission State",
-        "description": "Return live per-stage progress for one mission, with errors attributed per stage.\n\nEach stage carries a status and a progress fraction. Use this to answer how far along a\nmission is, or why it failed. Identify the mission by mission_id from list_missions.",
+        "description": "Return live per-stage progress of the mission's current run, errors attributed per stage.\n\nThe current run is the most recently started one still active, else the latest run of any\noutcome. Each stage carries a status and a progress fraction. Use this to answer how far\nalong a mission is, or why it failed. A mission that has never run has no state (404).",
         "operationId": "get_mission_state",
         "parameters": [
           {
@@ -586,7 +598,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MissionStateView"
+                  "$ref": "#/components/schemas/RunStateView"
                 }
               }
             }
@@ -610,7 +622,7 @@
           "missions"
         ],
         "summary": "Plan Coverage Mission",
-        "description": "Create a mission that covers a whole field, planned from the field's own boundary.\n\nUse this whenever the operator asks to cover, survey, mow or treat a field rather than to\ndrive to stated points. Give the field_id, the robot the plan is for, and the working width\nin metres; supply no coordinates, because the path is computed from the stored boundary, and\nno turning radius, because the robot declares its own.\n\nThe mission is created as a draft and is not dispatched. Its coverage metrics come back with\nit, so the operator can judge the plan before dispatching it.",
+        "description": "Create a mission that covers a whole field, planned from the field's own boundary.\n\nUse this whenever the operator asks to cover, survey, mow or treat a field rather than to\ndrive to stated points. Give the field_id, the robot the plan is for, and the working width\nin metres; supply no coordinates, because the path is computed from the stored boundary, and\nno turning radius, because the robot declares its own.\n\nWith ``replan`` set, the named mission's plan is rewritten in place instead and its id is\nreturned. The mission is not dispatched. Its coverage metrics come back with it, so the\noperator can judge the plan before dispatching it.",
         "operationId": "plan_coverage_mission",
         "requestBody": {
           "content": {
@@ -646,13 +658,57 @@
         }
       }
     },
+    "/api/v1/missions/{mission_id}/restore": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Restore Mission",
+        "description": "Bring an archived mission back into the list. Identify it by mission_id.",
+        "operationId": "restore_mission",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/missions/{mission_id}/assign": {
       "post": {
         "tags": [
           "missions"
         ],
         "summary": "Assign Mission",
-        "description": "Assign a mission to a robot, readying it for dispatch without starting it.\n\nIdentify the mission by mission_id and give the robot_id. To also start it, use\ndispatch_mission instead.",
+        "description": "Set the robot a mission runs on by default, checking it can, without starting it.\n\nIdentify the mission by mission_id and give the robot_id. To also start it, use\ndispatch_mission instead.",
         "operationId": "assign_mission",
         "parameters": [
           {
@@ -706,7 +762,7 @@
           "missions"
         ],
         "summary": "Unassign Mission",
-        "description": "Remove the robot assignment from a mission that has not yet been dispatched.\n\nIdentify the mission by mission_id.",
+        "description": "Clear a mission's default robot. Identify the mission by mission_id.",
         "operationId": "unassign_mission",
         "parameters": [
           {
@@ -750,7 +806,7 @@
           "missions"
         ],
         "summary": "Dispatch Mission",
-        "description": "Dispatch a mission to a robot and start it driving.\n\nSends the mission to its assigned robot, or to ``robot_id`` when given, and begins execution.\nThe mission must be in DRAFT or ASSIGNED; identify it by ``mission_id`` from list_missions.",
+        "description": "Start a run of a mission on a robot.\n\nSends the mission's stages to its default robot, or to ``robot_id`` when given, and begins\nexecution. A mission can be run any number of times; each run keeps its own record. While a\nrun of this mission is active, a second one is refused (409). Identify the mission by\n``mission_id`` from list_missions. The returned ``latest_run`` is the new run.",
         "operationId": "dispatch_mission",
         "parameters": [
           {
@@ -811,7 +867,7 @@
           "missions"
         ],
         "summary": "Cancel Mission",
-        "description": "Cancel a mission, stopping the robot if it is running.\n\nIdentify it by mission_id from list_missions.",
+        "description": "Cancel the mission's active run, stopping the robot.\n\nIdentify the mission by mission_id from list_missions. With more than one run active,\n``run_id`` says which. Both modes stop within seconds: 'graceful', the default, comes to a\ncontrolled stop at the next safe point and then cleans up; 'immediate' stops at once.",
         "operationId": "cancel_mission",
         "parameters": [
           {
@@ -825,6 +881,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CancelBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -855,7 +928,7 @@
           "missions"
         ],
         "summary": "Pause Mission",
-        "description": "Pause a running mission, holding the robot in place.\n\nIdentify the mission by mission_id. Use resume_mission to continue it.",
+        "description": "Pause the mission's running run, holding the robot in place.\n\nIdentify the mission by mission_id. Use resume_mission to continue it. With more than one\nrun active, ``run_id`` says which.",
         "operationId": "pause_mission",
         "parameters": [
           {
@@ -869,6 +942,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RunSelectBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -899,7 +989,7 @@
           "missions"
         ],
         "summary": "Resume Mission",
-        "description": "Resume a paused mission, letting the robot continue.\n\nIdentify it by mission_id.",
+        "description": "Resume the mission's paused run, letting the robot continue.\n\nIdentify it by mission_id. With more than one run active, ``run_id`` says which.",
         "operationId": "resume_mission",
         "parameters": [
           {
@@ -913,6 +1003,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RunSelectBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -937,14 +1044,14 @@
         }
       }
     },
-    "/api/v1/missions/{mission_id}/reset": {
-      "post": {
+    "/api/v1/missions/{mission_id}/runs": {
+      "get": {
         "tags": [
-          "missions"
+          "runs"
         ],
-        "summary": "Reset Mission",
-        "description": "Return a failed or cancelled mission to draft so it can be edited and dispatched again.\n\nIdentify the mission by mission_id.",
-        "operationId": "reset_mission",
+        "summary": "List Mission Runs",
+        "description": "List a mission's runs, newest first, without their plans.\n\nEvery execution the mission has ever had, whatever its outcome. Each carries its own robot,\ntimings, status and a digest of the plan it executed, so runs of an edited mission can be\ntold apart from runs of the plan as it stands.",
+        "operationId": "list_mission_runs",
         "parameters": [
           {
             "name": "mission_id",
@@ -955,6 +1062,37 @@
               "format": "uuid",
               "title": "Mission Id"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only runs created before this instant; pages backwards.",
+              "title": "Before"
+            },
+            "description": "Only runs created before this instant; pages backwards."
           }
         ],
         "responses": {
@@ -963,7 +1101,186 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MissionView"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunSummaryView"
+                  },
+                  "title": "Response List Mission Runs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get Run",
+        "description": "Return one run with the plan it executed, frozen at dispatch, and its failure cause.",
+        "operationId": "get_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Annotate Run",
+        "description": "Set or clear a run's notes. Notes are the operator's, editable at any time.",
+        "operationId": "annotate_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunNotesPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Delete Run",
+        "description": "Remove a finished run and its per-stage record.\n\nA run still active is refused (409): its robot is driving it. The audit log keeps every\ncompleted delete; what goes is the detail.",
+        "operationId": "delete_run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{run_id}/state": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get Run State",
+        "description": "Return one run's per-stage state with errors attributed per stage.\n\nA run the robot has not reported on yet projects every stage as WAITING from its own plan.",
+        "operationId": "get_run_state",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStateView"
                 }
               }
             }
@@ -1264,6 +1581,38 @@
         ],
         "title": "Battery"
       },
+      "CancelBody": {
+        "properties": {
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/CancelMode",
+            "description": "How the robot stops. Both stop within seconds: 'graceful' comes to a controlled stop at the next safe point (the current motion completed, the implement raised) and then runs the stage's on_cancel cleanup; 'immediate' stops at once, then cleans up.",
+            "default": "graceful"
+          }
+        },
+        "type": "object",
+        "title": "CancelBody"
+      },
+      "CancelMode": {
+        "type": "string",
+        "enum": [
+          "graceful",
+          "immediate"
+        ],
+        "title": "CancelMode",
+        "description": "How the robot should react to a cancel request."
+      },
       "CoverageCapability": {
         "properties": {
           "supported_waypoint_kinds": {
@@ -1554,17 +1903,22 @@
             "minItems": 1,
             "title": "Segments",
             "description": "The whole stage as one ordered route. Concatenating the segments gives the drivable line, turns included; the kinds say which of it is a worked swath. Consecutive segments share an endpoint, which a receiver joining them skips."
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/CoverageProvenance",
+            "description": "The inputs, measurements and act that produced these segments."
           }
         },
         "type": "object",
         "required": [
           "stage_id",
-          "segments"
+          "segments",
+          "provenance"
         ],
         "title": "CoverageStage",
-        "description": "Cover a field by driving its swaths in order, each reached by the turn before it."
+        "description": "Cover a field by driving its swaths in order, each reached by the turn before it.\n\nProvenance is required, so this stage cannot be written by hand: swaths come from the\nplanner, and the checks that refuse a robot which would cut the corners read the parameters\nthe plan was made with."
       },
-      "CoverageStageInput": {
+      "CoverageStageRef": {
         "properties": {
           "kind": {
             "type": "string",
@@ -1572,49 +1926,18 @@
             "title": "Kind",
             "default": "coverage"
           },
-          "segments": {
-            "items": {
-              "$ref": "#/components/schemas/SegmentInput"
-            },
-            "type": "array",
-            "minItems": 1,
-            "title": "Segments"
-          },
-          "on_cancel": {
-            "anyOf": [
-              {
-                "items": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/NavigationStageInput"
-                    },
-                    {
-                      "$ref": "#/components/schemas/CoverageStageInput"
-                    }
-                  ],
-                  "discriminator": {
-                    "propertyName": "kind",
-                    "mapping": {
-                      "coverage": "#/components/schemas/CoverageStageInput",
-                      "navigation": "#/components/schemas/NavigationStageInput"
-                    }
-                  }
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "On Cancel"
+          "stage_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Stage Id"
           }
         },
         "type": "object",
         "required": [
-          "segments"
+          "stage_id"
         ],
-        "title": "CoverageStageInput",
-        "description": "Cover a field by driving its swaths, each reached by the turn before it.\n\nIdentity is assigned by the backend, exactly as for a navigation stage."
+        "title": "CoverageStageRef",
+        "description": "A coverage stage this mission already has, carried through an edit unchanged.\n\nSwaths are a planner's output, so there is no way to write one here: the stage is named, and\nthe stored segments and provenance are kept as they are. Naming a stage of another mission,\nor one that is not coverage, is refused."
       },
       "ErrorOrigin": {
         "type": "string",
@@ -1897,7 +2220,7 @@
             "description": "Whether the last pass may overlap the one before it. A field is rarely a whole number of passes wide; leaving the remainder unworked is the alternative. Set it false only when working ground twice is worse than missing a strip.",
             "default": false
           },
-          "replaces": {
+          "replan": {
             "anyOf": [
               {
                 "type": "string",
@@ -1907,8 +2230,8 @@
                 "type": "null"
               }
             ],
-            "title": "Replaces",
-            "description": "A coverage mission over the same field that this plan supersedes; it is deleted once the new one exists. Pass it when the operator wants an existing plan changed rather than a second one, because a plan is re-derived rather than edited."
+            "title": "Replan",
+            "description": "The id of an existing coverage stage whose path should be re-planned in place, instead of creating a new mission. Pass it when the operator wants an existing plan changed rather than a second one: a plan is re-derived rather than edited. The mission keeps its id, its name, its other stages and every run it has had; only that stage's path and provenance change."
           }
         },
         "additionalProperties": false,
@@ -1947,13 +2270,13 @@
                   "$ref": "#/components/schemas/NavigationStageInput"
                 },
                 {
-                  "$ref": "#/components/schemas/CoverageStageInput"
+                  "$ref": "#/components/schemas/CoverageStageRef"
                 }
               ],
               "discriminator": {
                 "propertyName": "kind",
                 "mapping": {
-                  "coverage": "#/components/schemas/CoverageStageInput",
+                  "coverage": "#/components/schemas/CoverageStageRef",
                   "navigation": "#/components/schemas/NavigationStageInput"
                 }
               }
@@ -1973,15 +2296,32 @@
       "MissionDispatchBody": {
         "properties": {
           "robot_id": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Robot Id"
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Robot Id",
+            "description": "Robot to run on; defaults to the assigned one."
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
           }
         },
         "type": "object",
-        "required": [
-          "robot_id"
-        ],
         "title": "MissionDispatchBody"
       },
       "MissionError": {
@@ -2019,44 +2359,6 @@
         "title": "MissionError",
         "description": "A structured error report attached to a stage or mission.\n\nMirrors the proto ``Error`` (severity / type / references / description); ``origin``\nis a backend-only marker distinguishing a robot fault from a backend-authored cause."
       },
-      "MissionStateView": {
-        "properties": {
-          "mission_id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Mission Id"
-          },
-          "stage_states": {
-            "items": {
-              "$ref": "#/components/schemas/StageStateView"
-            },
-            "type": "array",
-            "title": "Stage States"
-          }
-        },
-        "type": "object",
-        "required": [
-          "mission_id",
-          "stage_states"
-        ],
-        "title": "MissionStateView",
-        "description": "A mission's per-stage state as one read shape for both REST and the live WS frame."
-      },
-      "MissionStatus": {
-        "type": "string",
-        "enum": [
-          "DRAFT",
-          "ASSIGNED",
-          "DISPATCHED",
-          "RUNNING",
-          "PAUSED",
-          "SUCCEEDED",
-          "FAILED",
-          "CANCELLED"
-        ],
-        "title": "MissionStatus",
-        "description": "Lifecycle state of a Mission as tracked by the backend."
-      },
       "MissionUpdate": {
         "properties": {
           "name": {
@@ -2090,13 +2392,13 @@
                       "$ref": "#/components/schemas/NavigationStageInput"
                     },
                     {
-                      "$ref": "#/components/schemas/CoverageStageInput"
+                      "$ref": "#/components/schemas/CoverageStageRef"
                     }
                   ],
                   "discriminator": {
                     "propertyName": "kind",
                     "mapping": {
-                      "coverage": "#/components/schemas/CoverageStageInput",
+                      "coverage": "#/components/schemas/CoverageStageRef",
                       "navigation": "#/components/schemas/NavigationStageInput"
                     }
                   }
@@ -2119,10 +2421,6 @@
             "type": "string",
             "format": "uuid",
             "title": "Mission Id"
-          },
-          "update_id": {
-            "type": "integer",
-            "title": "Update Id"
           },
           "name": {
             "type": "string",
@@ -2160,10 +2458,7 @@
             "type": "array",
             "title": "Stages"
           },
-          "status": {
-            "$ref": "#/components/schemas/MissionStatus"
-          },
-          "robot_id": {
+          "assigned_robot_id": {
             "anyOf": [
               {
                 "type": "string"
@@ -2172,9 +2467,9 @@
                 "type": "null"
               }
             ],
-            "title": "Robot Id"
+            "title": "Assigned Robot Id"
           },
-          "dispatched_at": {
+          "archived_at": {
             "anyOf": [
               {
                 "type": "string",
@@ -2184,7 +2479,7 @@
                 "type": "null"
               }
             ],
-            "title": "Dispatched At"
+            "title": "Archived At"
           },
           "created_at": {
             "type": "string",
@@ -2196,43 +2491,42 @@
             "format": "date-time",
             "title": "Updated At"
           },
-          "failure_errors": {
+          "stages_digest": {
+            "type": "string",
+            "title": "Stages Digest",
+            "description": "Digest of the stages as they stand now. A run whose stages_digest matches ran the plan this mission currently holds; one that differs ran an older plan. Computed the same way as a run's, so the two are directly comparable."
+          },
+          "latest_run": {
             "anyOf": [
               {
-                "items": {
-                  "$ref": "#/components/schemas/MissionError"
-                },
-                "type": "array"
+                "$ref": "#/components/schemas/RunSummaryView"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Failure Errors"
+            "description": "The most recently created run; null means the mission has never run."
           },
-          "coverage": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/CoverageProvenance"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "active_runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunSummaryView"
+            },
+            "type": "array",
+            "title": "Active Runs",
+            "description": "Every run of this mission still occupying a robot, newest first. Whether the mission is running is this being non-empty, not the status of latest_run: a concurrent run that ends first becomes latest_run while the other still drives. With more than one entry, mission-addressed cancel, pause and resume require a run_id, and these are the candidates."
           }
         },
         "type": "object",
         "required": [
           "mission_id",
-          "update_id",
           "name",
           "description",
           "stages",
-          "status",
-          "robot_id",
-          "dispatched_at",
+          "assigned_robot_id",
+          "archived_at",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "stages_digest"
         ],
         "title": "MissionView"
       },
@@ -2332,6 +2626,18 @@
             "title": "Kind",
             "default": "navigation"
           },
+          "stage_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage Id"
+          },
           "waypoints": {
             "items": {
               "oneOf": [
@@ -2364,13 +2670,13 @@
                       "$ref": "#/components/schemas/NavigationStageInput"
                     },
                     {
-                      "$ref": "#/components/schemas/CoverageStageInput"
+                      "$ref": "#/components/schemas/CoverageStageRef"
                     }
                   ],
                   "discriminator": {
                     "propertyName": "kind",
                     "mapping": {
-                      "coverage": "#/components/schemas/CoverageStageInput",
+                      "coverage": "#/components/schemas/CoverageStageRef",
                       "navigation": "#/components/schemas/NavigationStageInput"
                     }
                   }
@@ -2390,7 +2696,7 @@
           "waypoints"
         ],
         "title": "NavigationStageInput",
-        "description": "Drive the robot through an ordered list of waypoints, as requested by a caller.\n\nIdentity is deliberately absent, and that is the point: ``stage_id`` is assigned by the\nbackend, so no caller can choose one. Two stages sharing an id would collapse onto a single\n``mission_stage_state`` row, leaving the robot's per-stage reports unattributable."
+        "description": "Drive the robot through an ordered list of waypoints, as requested by a caller.\n\nSupply ``stage_id`` to keep a stage's identity across an edit, so its runs stay comparable;\nomit it for a new stage and the backend assigns one. A supplied id must already belong to the\nmission being edited and appear once in the request."
       },
       "PhysicalParameters": {
         "properties": {
@@ -2700,6 +3006,16 @@
                 "type": "null"
               }
             ]
+          },
+          "current_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunSummaryView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2711,6 +3027,442 @@
           "status"
         ],
         "title": "RobotView"
+      },
+      "RunNotesPatch": {
+        "properties": {
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "title": "RunNotesPatch"
+      },
+      "RunOriginView": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "agent"
+            ],
+            "title": "Kind"
+          },
+          "actor": {
+            "type": "string",
+            "title": "Actor"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "actor"
+        ],
+        "title": "RunOriginView"
+      },
+      "RunSelectBody": {
+        "properties": {
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          }
+        },
+        "type": "object",
+        "title": "RunSelectBody",
+        "description": "Which run a mission-addressed command means; needed only when several are active."
+      },
+      "RunSiteAnchor": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "anchor_lat": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Anchor Lat"
+          },
+          "anchor_lon": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Anchor Lon"
+          },
+          "anchor_heading_deg": {
+            "type": "number",
+            "exclusiveMaximum": 360.0,
+            "minimum": 0.0,
+            "title": "Anchor Heading Deg"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "anchor_lat",
+          "anchor_lon",
+          "anchor_heading_deg"
+        ],
+        "title": "RunSiteAnchor",
+        "description": "Where a site stood when a run was dispatched into it.\n\nA site-local waypoint is a pair of numbers that mean nothing without the frame they are\nmeasured in, so the frame is copied into the run beside the plan. The name is copied\ntoo, so the run stays readable after the site is deleted."
+      },
+      "RunStateView": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "mission_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mission Id"
+          },
+          "stage_states": {
+            "items": {
+              "$ref": "#/components/schemas/StageStateView"
+            },
+            "type": "array",
+            "title": "Stage States"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "mission_id",
+          "stage_states"
+        ],
+        "title": "RunStateView",
+        "description": "A run's per-stage state as one read shape for both REST and the live WS frame.\n\nCarries both ids: the WS topic is keyed by mission, so a subscriber showing one run must\nfilter frames by ``run_id``, and a list of missions indexes them by ``mission_id``."
+      },
+      "RunStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "DISPATCHED",
+          "RUNNING",
+          "PAUSED",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELLED",
+          "REJECTED"
+        ],
+        "title": "RunStatus",
+        "description": "Lifecycle state of a MissionRun, owned by the backend.\n\n``PENDING`` is the run row committed before the robot has answered the dispatch. ``REJECTED``\nis kept apart from ``FAILED`` because they mean different things for the robot: a rejection\nmeans it is definitely not driving, while a timeout or a mid-run failure means it may be."
+      },
+      "RunSummaryView": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "mission_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mission Id"
+          },
+          "robot_id": {
+            "type": "string",
+            "title": "Robot Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "stages_digest": {
+            "type": "string",
+            "title": "Stages Digest",
+            "description": "Content digest of what this run was told to do, ignoring stage ids and how a stage was produced. Two runs with the same digest drove the same ground."
+          },
+          "origin": {
+            "$ref": "#/components/schemas/RunOriginView"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "dispatched_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "last_frame_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Frame At",
+            "description": "When the robot last reported on this run, by the backend's clock."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "When the backend last changed this run: a status transition or a notes edit."
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "mission_id",
+          "robot_id",
+          "status",
+          "stages_digest",
+          "origin",
+          "notes",
+          "created_at",
+          "dispatched_at",
+          "started_at",
+          "ended_at",
+          "last_frame_at",
+          "updated_at"
+        ],
+        "title": "RunSummaryView",
+        "description": "A run without its stages: what a list shows, and what a mission carries as ``latest_run``."
+      },
+      "RunView": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Run Id"
+          },
+          "mission_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Mission Id"
+          },
+          "robot_id": {
+            "type": "string",
+            "title": "Robot Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "stages_digest": {
+            "type": "string",
+            "title": "Stages Digest",
+            "description": "Content digest of what this run was told to do, ignoring stage ids and how a stage was produced. Two runs with the same digest drove the same ground."
+          },
+          "origin": {
+            "$ref": "#/components/schemas/RunOriginView"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "dispatched_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "last_frame_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Frame At",
+            "description": "When the robot last reported on this run, by the backend's clock."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "When the backend last changed this run: a status transition or a notes edit."
+          },
+          "stages": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/NavigationStage"
+                },
+                {
+                  "$ref": "#/components/schemas/CoverageStage"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "coverage": "#/components/schemas/CoverageStage",
+                  "navigation": "#/components/schemas/NavigationStage"
+                }
+              }
+            },
+            "type": "array",
+            "title": "Stages"
+          },
+          "site_anchors": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/RunSiteAnchor"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Site Anchors",
+            "description": "The frame of each site this run drove in, as it stood at dispatch, keyed by site id. Site-local waypoints are measured against these rather than against the site as it is now, so moving or deleting a site cannot move a run that already happened."
+          },
+          "failure_errors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MissionError"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "mission_id",
+          "robot_id",
+          "status",
+          "stages_digest",
+          "origin",
+          "notes",
+          "created_at",
+          "dispatched_at",
+          "started_at",
+          "ended_at",
+          "last_frame_at",
+          "updated_at",
+          "stages"
+        ],
+        "title": "RunView",
+        "description": "A run with the stages it was dispatched with, frozen as they stood, and any failure."
       },
       "Segment": {
         "properties": {
@@ -2753,47 +3505,6 @@
         ],
         "title": "Segment",
         "description": "One swath across a field, or the turn joining two of them.\n\nThe distinction is the reason coverage is a stage kind of its own. The ground under a swath is\nwhat gets worked, so a robot that took any convenient path between the same two endpoints would\nleave the strip beside it unworked; the ground under a turn is worked by nothing."
-      },
-      "SegmentInput": {
-        "properties": {
-          "kind": {
-            "type": "string",
-            "enum": [
-              "swath",
-              "turn"
-            ],
-            "title": "Kind"
-          },
-          "waypoints": {
-            "items": {
-              "oneOf": [
-                {
-                  "$ref": "#/components/schemas/WGS84Waypoint"
-                },
-                {
-                  "$ref": "#/components/schemas/SiteLocalWaypoint"
-                }
-              ],
-              "discriminator": {
-                "propertyName": "kind",
-                "mapping": {
-                  "site_local": "#/components/schemas/SiteLocalWaypoint",
-                  "wgs84": "#/components/schemas/WGS84Waypoint"
-                }
-              }
-            },
-            "type": "array",
-            "minItems": 2,
-            "title": "Waypoints"
-          }
-        },
-        "type": "object",
-        "required": [
-          "kind",
-          "waypoints"
-        ],
-        "title": "SegmentInput",
-        "description": "One swath across a field, or the turn joining two of them."
       },
       "SiteCreate": {
         "properties": {
@@ -3128,6 +3839,15 @@
             },
             "type": "array",
             "title": "Errors"
+          },
+          "status_source": {
+            "type": "string",
+            "enum": [
+              "robot",
+              "backend"
+            ],
+            "title": "Status Source",
+            "description": "Who established the status: 'robot' when the robot reported it, 'backend' when the backend projected it because the run ended before the robot reported this stage."
           }
         },
         "type": "object",
@@ -3139,7 +3859,8 @@
           "started_at",
           "ended_at",
           "result",
-          "errors"
+          "errors",
+          "status_source"
         ],
         "title": "StageStateView",
         "description": "One stage's runtime state plus the errors attributed to it."

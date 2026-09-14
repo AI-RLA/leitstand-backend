@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from leitstand_backend.adapters.inbound.web.runs.dto import RunSummaryView
 from leitstand_backend.domain.model.robot.robot import Metadata
 from leitstand_backend.domain.model.robot.robot_factsheet import RobotFactsheet
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
@@ -21,3 +22,5 @@ class RobotView(BaseModel):
     battery: Battery | None = None
     status: RobotStatus
     factsheet: RobotFactsheet | None = None
+    # What the robot is doing right now; null when idle.
+    current_run: RunSummaryView | None = None

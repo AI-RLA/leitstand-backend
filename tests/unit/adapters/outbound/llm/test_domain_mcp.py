@@ -113,3 +113,18 @@ async def test_every_tool_has_a_usable_description() -> None:
 
     assert tools, "no tools exposed at all: curation matched nothing"
     assert thin == [], f"tools with descriptions too thin to route on: {thin}"
+
+
+async def test_run_routes_are_exposed_exactly_as_intended() -> None:
+    """Runs added one write the agent may propose and one it may not, plus reads it does not need.
+
+    ``restore_mission`` undoes an archive and needs an approval card. ``annotate_run`` is the one
+    run-addressed write, kept off the agent entirely: notes are the operator's. There is no
+    ``reset_mission``. The catch-all excludes whatever the lists omit, so a name alone exposes nothing.
+    """
+    names = {tool.name.removeprefix("leitstand_") for tool in await _tools()}
+    assert "restore_mission" in names and requires_approval("restore_mission")
+    assert "annotate_run" not in names
+    assert "delete_run" not in names
+    assert "reset_mission" not in names
+    assert "list_mission_runs" not in names and "get_run" not in names

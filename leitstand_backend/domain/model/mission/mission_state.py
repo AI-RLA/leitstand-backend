@@ -77,9 +77,12 @@ class StageState(BaseModel):
 
 
 class MissionStateMessage(BaseModel):
-    """Periodic + event-driven snapshot of a running mission, published by the robot."""
+    """Periodic + event-driven snapshot of a run, published by the robot.
 
-    mission_id: UUID
+    The robot names the run it is executing; it never knows or needs the mission's own id.
+    """
+
+    run_id: UUID
     header_id: int = Field(
         ge=0,
         description=(

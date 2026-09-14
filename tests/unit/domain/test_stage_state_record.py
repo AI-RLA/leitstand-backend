@@ -7,13 +7,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from leitstand_backend.domain.model.mission.mission import MissionStatus, NavigationStage
+from leitstand_backend.domain.model.mission.mission import NavigationStage
 from leitstand_backend.domain.model.mission.mission_state import (
     ErrorOrigin,
     ErrorReference,
     ErrorSeverity,
     MissionError,
 )
+from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.mission.stage_state_record import (
     StageStateRecord,
     attribute_errors,
@@ -44,40 +45,40 @@ def _record(stage_id: UUID, index: int, status: S, *, started: bool = False) -> 
 
 
 @pytest.mark.parametrize(
-    ("live, mission_status, expected"),
+    ("live, run_status, expected"),
     [
         (
             [S.FINISHED, S.FAILED, S.WAITING],
-            MissionStatus.CANCELLED,
+            RunStatus.CANCELLED,
             [S.FINISHED, S.FAILED, S.SKIPPED],
         ),
         (
             [S.FINISHED, S.RUNNING, S.WAITING],
-            MissionStatus.CANCELLED,
+            RunStatus.CANCELLED,
             [S.FINISHED, S.CANCELLED, S.SKIPPED],
         ),
         (
             [S.FINISHED, S.RUNNING, S.WAITING],
-            MissionStatus.FAILED,
+            RunStatus.FAILED,
             [S.FINISHED, S.FAILED, S.SKIPPED],
         ),
         (
             [S.WAITING, S.RUNNING, S.FINISHED],
-            MissionStatus.SUCCEEDED,
+            RunStatus.SUCCEEDED,
             [S.FINISHED, S.FINISHED, S.FINISHED],
         ),
         (
             [S.FINISHED, S.WAITING, S.WAITING],
-            MissionStatus.CANCELLED,
+            RunStatus.CANCELLED,
             [S.FINISHED, S.SKIPPED, S.SKIPPED],
         ),
-        ([S.FINISHED, S.FAILED, S.FAILED], MissionStatus.FAILED, [S.FINISHED, S.FAILED, S.FAILED]),
-        ([None, None], MissionStatus.FAILED, [S.SKIPPED, S.SKIPPED]),
-        ([S.FINISHED, None, None], MissionStatus.CANCELLED, [S.FINISHED, S.SKIPPED, S.SKIPPED]),
+        ([S.FINISHED, S.FAILED, S.FAILED], RunStatus.FAILED, [S.FINISHED, S.FAILED, S.FAILED]),
+        ([None, None], RunStatus.FAILED, [S.SKIPPED, S.SKIPPED]),
+        ([S.FINISHED, None, None], RunStatus.CANCELLED, [S.FINISHED, S.SKIPPED, S.SKIPPED]),
     ],
 )
 def test_final_stage_statuses(
-    live: list[S | None], mission_status: MissionStatus, expected: list[S]
+    live: list[S | None], run_status: RunStatus, expected: list[S]
 ) -> None:
     stages = _stages(len(live))
     live_by_id = {
@@ -85,7 +86,7 @@ def test_final_stage_statuses(
         for i, status in enumerate(live)
         if status is not None
     }
-    resolved = final_stage_statuses(stages, live_by_id, mission_status, _RESOLVE_AT)
+    resolved = final_stage_statuses(stages, live_by_id, run_status, _RESOLVE_AT)
     assert [r.status for r in resolved] == expected
     assert [r.stage_index for r in resolved] == list(range(len(live)))
 
@@ -95,13 +96,47 @@ def test_ended_at_stamped_only_for_started_terminal_stages() -> None:
     # Stage 0 was running and is cancelled; stage 1 never reported and is skipped.
     live_by_id = {stages[0].stage_id: _record(stages[0].stage_id, 0, S.RUNNING, started=True)}
 
-    resolved = final_stage_statuses(stages, live_by_id, MissionStatus.CANCELLED, _RESOLVE_AT)
+    resolved = final_stage_statuses(stages, live_by_id, RunStatus.CANCELLED, _RESOLVE_AT)
     by_id = {r.stage_id: r for r in resolved}
 
     assert by_id[stages[0].stage_id].status is S.CANCELLED
     assert by_id[stages[0].stage_id].ended_at == _RESOLVE_AT
     assert by_id[stages[1].stage_id].status is S.SKIPPED
     assert by_id[stages[1].stage_id].ended_at is None
+
+
+def test_status_source_names_who_established_each_final_status() -> None:
+    """The operator's question is whether the robot did a stage or the backend marked it.
+
+    Three stages of a cancelled run: one the robot finished (kept as reported), one it was
+    driving (the backend projects CANCELLED over the robot's RUNNING), one it never reached
+    (nothing reported, the backend sets SKIPPED).
+    """
+    stages = _stages(3)
+    live_by_id = {
+        stages[0].stage_id: _record(stages[0].stage_id, 0, S.FINISHED, started=True),
+        stages[1].stage_id: _record(stages[1].stage_id, 1, S.RUNNING, started=True),
+    }
+
+    resolved = final_stage_statuses(stages, live_by_id, RunStatus.CANCELLED, _RESOLVE_AT)
+    by_id = {r.stage_id: r for r in resolved}
+
+    assert (by_id[stages[0].stage_id].status, by_id[stages[0].stage_id].status_source) == (
+        S.FINISHED,
+        "robot",
+    )
+    assert (by_id[stages[1].stage_id].status, by_id[stages[1].stage_id].status_source) == (
+        S.CANCELLED,
+        "backend",
+    )
+    assert (by_id[stages[2].stage_id].status, by_id[stages[2].stage_id].status_source) == (
+        S.SKIPPED,
+        "backend",
+    )
+
+
+def test_a_frame_the_robot_sent_is_the_robots_word_by_default() -> None:
+    assert _record(uuid4(), 0, S.RUNNING).status_source == "robot"
 
 
 def _error(stage_id: UUID | None = None) -> MissionError:

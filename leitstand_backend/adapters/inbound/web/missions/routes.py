@@ -1,126 +1,188 @@
-"""Mission CRUD + lifecycle action endpoints."""
+"""Mission definition CRUD and the mission-addressed run verbs."""
 
 from __future__ import annotations
 
+from collections import defaultdict
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from leitstand_backend.adapters.inbound.web.missions.dto import (
+    CancelBody,
     MissionAssignBody,
     MissionCoverageCreate,
     MissionCreate,
     MissionDispatchBody,
     MissionUpdate,
     MissionView,
+    RunSelectBody,
 )
 from leitstand_backend.adapters.inbound.web.missions.mappers import (
     to_assign_command,
     to_cancel_command,
     to_create_command,
     to_delete_command,
-    to_dispatch_command,
     to_mission_view,
     to_pause_command,
     to_plan_coverage_command,
-    to_reset_command,
+    to_restore_command,
     to_resume_command,
+    to_start_run_command,
     to_unassign_command,
     to_update_command,
 )
-from leitstand_backend.application.mission_state_view import (
-    MissionStateView,
-    build_mission_state_view,
-)
+from leitstand_backend.application.run_state_view import RunStateView, build_run_state_view
 from leitstand_backend.domain.errors import (
+    AmbiguousRun,
     CoveragePlannerUnavailable,
     CoveragePlanRejected,
+    DuplicateStageId,
     FieldNotFoundError,
     FieldNotPlannable,
-    GeneratedPlanNotEditable,
     ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     InvalidMissionTransition,
+    MissionArchived,
+    MissionDispatchFailed,
     MissionDispatchTimeout,
+    MissionNotArchived,
     MissionNotFoundError,
     MissionRejectedByRobot,
+    MissionRunInProgress,
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
     RobotPhysicalParametersMissing,
+    RunNotFoundError,
     StageNotHomogeneous,
+    StageNotInMission,
+    StageSpansSites,
     StaleCoverageBoundary,
     UnknownSite,
     UnknownSiteForRobot,
     UnsupportedStageKind,
     UnsupportedWaypointFrame,
 )
+from leitstand_backend.domain.model.mission.mission_run import MissionRunSummary
+from leitstand_backend.domain.model.mission.stage_state_record import waiting_stage_statuses
 from leitstand_backend.infrastructure.deps import (
+    current_run_origin,
     get_coverage_planning_use_case,
-    get_dispatch_use_case,
     get_mission_management_use_case,
     get_mission_repository,
+    get_mission_run_repository,
+    get_run_management_use_case,
+    get_run_start_use_case,
 )
 from leitstand_backend.ports.inbound.coverage_planning import CoveragePlanningUseCase
 from leitstand_backend.ports.inbound.mission_management import MissionManagementUseCase
+from leitstand_backend.ports.inbound.run_management import RunManagementUseCase
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
+from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
 
 router = APIRouter(prefix="/api/v1/missions", tags=["missions"])
+
+_AUTHORING_ERRORS = (
+    StageNotHomogeneous,
+    StageSpansSites,
+    UnknownSite,
+    DuplicateStageId,
+    StageNotInMission,
+)
+_ROBOT_FIT_ERRORS = (
+    StageNotHomogeneous,
+    UnsupportedStageKind,
+    UnknownSiteForRobot,
+    UnsupportedWaypointFrame,
+    IncompatibleTurningRadius,
+    ImplementNarrowerThanRobot,
+    RobotPhysicalParametersMissing,
+    StaleCoverageBoundary,
+)
+
+
+async def _view(
+    mission_id: UUID, repo: MissionRepository, runs: MissionRunRepository
+) -> MissionView:
+    record = await repo.get(mission_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    latest = await runs.latest_by_mission([mission_id])
+    active = await runs.list_active_by_mission(mission_id)
+    return to_mission_view(record, latest.get(mission_id), active)
 
 
 @router.get("/", response_model=list[MissionView], operation_id="list_missions")
 async def list_missions(
     robot: str | None = Query(
-        default=None, description="Filter to missions assigned to this robot id."
+        default=None, description="Filter to missions whose default robot is this robot id."
     ),
     name: str | None = Query(
         default=None,
         description="Filter to missions with exactly this name, matched case-insensitively.",
     ),
+    include_archived: bool = Query(default=False, description="Also return archived missions."),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> list[MissionView]:
-    """List missions newest first, each with its lifecycle status and assigned robot.
+    """List missions newest first, each with its latest run.
 
-    Status is one of DRAFT, ASSIGNED, DISPATCHED, RUNNING, PAUSED, SUCCEEDED, FAILED or
-    CANCELLED. Optionally filter by robot, by name, or both. This returns mission definitions and
-    status, not live per-stage progress: use get_mission_state for that.
+    A mission is a definition that can be run any number of times; ``latest_run`` carries the
+    status, robot and timings of its most recent run and is null when it has never run. Its
+    status is one of PENDING, DISPATCHED, RUNNING, PAUSED, SUCCEEDED, FAILED, CANCELLED or
+    REJECTED. Optionally filter by robot, by name, or both. This returns definitions, not live
+    per-stage progress: use get_mission_state for that.
     """
-    return [to_mission_view(r) for r in await repo.list_records(robot_id=robot, name=name)]
+    missions = await repo.list(robot_id=robot, name=name, include_archived=include_archived)
+    latest = await runs.latest_by_mission([m.mission_id for m in missions])
+    active: dict[UUID, list[MissionRunSummary]] = defaultdict(list)
+    for run in await runs.list_active():
+        active[run.mission_id].append(run)
+    return [
+        to_mission_view(m, latest.get(m.mission_id), active.get(m.mission_id, ())) for m in missions
+    ]
 
 
 @router.get("/{mission_id}", response_model=MissionView, operation_id="get_mission")
 async def get_mission(
     mission_id: UUID,
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Return one mission's definition, lifecycle status and assigned robot.
+    """Return one mission's definition, default robot and latest run.
 
     Identify the mission by mission_id from list_missions, which is also how a mission named by
-    the operator is resolved.
+    the operator is resolved. Its run history is list_mission_runs.
     """
-    record = await repo.get_record(mission_id)
-    if record is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    return to_mission_view(record)
+    return await _view(mission_id, repo, runs)
 
 
-@router.get(
-    "/{mission_id}/state", response_model=MissionStateView, operation_id="get_mission_state"
-)
+@router.get("/{mission_id}/state", response_model=RunStateView, operation_id="get_mission_state")
 async def get_mission_state(
     mission_id: UUID,
     repo: MissionRepository = Depends(get_mission_repository),
-) -> MissionStateView:
-    """Return live per-stage progress for one mission, with errors attributed per stage.
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
+) -> RunStateView:
+    """Return live per-stage progress of the mission's current run, errors attributed per stage.
 
-    Each stage carries a status and a progress fraction. Use this to answer how far along a
-    mission is, or why it failed. Identify the mission by mission_id from list_missions.
+    The current run is the most recently started one still active, else the latest run of any
+    outcome. Each stage carries a status and a progress fraction. Use this to answer how far
+    along a mission is, or why it failed. A mission that has never run has no state (404).
     """
-    record = await repo.get_record(mission_id)
-    if record is None:
+    if await repo.get(mission_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    stage_states = await repo.get_stage_states(mission_id)
-    return build_mission_state_view(mission_id, stage_states, record.failure_errors)
+    active = await runs.list_active_by_mission(mission_id)
+    summary = active[0] if active else (await runs.latest_by_mission([mission_id])).get(mission_id)
+    if summary is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission has never run")
+    run = await runs.get(summary.run_id)
+    if run is None:
+        # Deleted between listing it and reading it; the mission now has no run to report on.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission has never run")
+    rows = await runs.get_stage_runs(run.run_id) or waiting_stage_statuses(
+        run.stages, run.created_at
+    )
+    return build_run_state_view(run.run_id, run.mission_id, rows, run.failure_errors)
 
 
 @router.post(
@@ -133,6 +195,7 @@ async def create_mission(
     body: MissionCreate,
     uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
     """Create a mission from a name and an ordered list of navigation stages.
 
@@ -144,15 +207,14 @@ async def create_mission(
 
     ``stages`` is a list of stage objects, not text containing a list.
 
-    The backend assigns the mission and stage ids. The mission is created as a draft and is not
-    dispatched.
+    The backend assigns the mission and stage ids. The mission is a definition and is not
+    dispatched; dispatch_mission runs it, as many times as wanted.
     """
     try:
         mission = await uc.create(to_create_command(body))
-    except (StageNotHomogeneous, UnknownSite) as exc:
+    except _AUTHORING_ERRORS as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+    return await _view(mission.mission_id, repo, runs)
 
 
 @router.post(
@@ -165,6 +227,7 @@ async def plan_coverage_mission(
     body: MissionCoverageCreate,
     uc: CoveragePlanningUseCase = Depends(get_coverage_planning_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
     """Create a mission that covers a whole field, planned from the field's own boundary.
 
@@ -173,16 +236,17 @@ async def plan_coverage_mission(
     in metres; supply no coordinates, because the path is computed from the stored boundary, and
     no turning radius, because the robot declares its own.
 
-    The mission is created as a draft and is not dispatched. Its coverage metrics come back with
-    it, so the operator can judge the plan before dispatching it.
+    With ``replan`` set, the named mission's plan is rewritten in place instead and its id is
+    returned. The mission is not dispatched. Its coverage metrics come back with it, so the
+    operator can judge the plan before dispatching it.
     """
     try:
         mission = await uc.plan(to_plan_coverage_command(body))
     except FieldNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "field not found")
     except MissionNotFoundError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission to replace not found")
-    except InvalidMissionTransition as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission to re-plan not found")
+    except (InvalidMissionTransition, MissionArchived) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     except (
         CoveragePlanRejected,
@@ -190,13 +254,14 @@ async def plan_coverage_mission(
         RobotFactsheetMissing,
         RobotPhysicalParametersMissing,
         StageNotHomogeneous,
+        StageNotInMission,
+        StageSpansSites,
         UnsupportedStageKind,
     ) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     except CoveragePlannerUnavailable as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+    return await _view(mission.mission_id, repo, runs)
 
 
 @router.patch("/{mission_id}", response_model=MissionView, operation_id="update_mission")
@@ -205,22 +270,26 @@ async def update_mission(
     body: MissionUpdate,
     uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Change a draft mission's name, description, or stages.
+    """Change a mission's name, description, or stages.
 
-    Only a mission still in DRAFT can be updated. Identify it by mission_id from list_missions.
-    Supplying stages replaces the existing ones, which a planned mission refuses: re-plan it.
+    Allowed at any time, even while a run is active: a run carries its own copy of the plan, so
+    editing the definition never changes what a run did or is doing. Identify the mission by
+    mission_id from list_missions. Supplying stages replaces the existing ones; a stage that
+    carries its stage_id keeps its identity across the edit, one without gets a new id, and one
+    left out is removed. A planned coverage stage is carried by its stage_id alone; its path
+    cannot be written here, only re-planned.
     """
     try:
         mission = await uc.update(to_update_command(mission_id, body))
     except MissionNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
+    except MissionArchived as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    except (StageNotHomogeneous, UnknownSite, GeneratedPlanNotEditable) as exc:
+    except _AUTHORING_ERRORS as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+    return await _view(mission.mission_id, repo, runs)
 
 
 @router.delete(
@@ -230,17 +299,35 @@ async def delete_mission(
     mission_id: UUID,
     uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
 ) -> None:
-    """Delete a mission permanently.
+    """Delete a mission that never ran, or archive one that did.
 
-    Only a draft or already-finished mission can be deleted, and this cannot be undone. Identify
-    the mission by mission_id from list_missions.
+    A mission with runs is archived rather than deleted: it leaves the list, its runs stay
+    readable, and restore_mission brings it back. A mission with a run in progress is refused.
+    Identify the mission by mission_id from list_missions.
     """
     try:
         await uc.delete(to_delete_command(mission_id))
     except MissionNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
+    except MissionRunInProgress as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+
+
+@router.post("/{mission_id}/restore", response_model=MissionView, operation_id="restore_mission")
+async def restore_mission(
+    mission_id: UUID,
+    uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
+    repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
+) -> MissionView:
+    """Bring an archived mission back into the list. Identify it by mission_id."""
+    try:
+        mission = await uc.restore(to_restore_command(mission_id))
+    except MissionNotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    except MissionNotArchived as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    return await _view(mission.mission_id, repo, runs)
 
 
 @router.post("/{mission_id}/assign", response_model=MissionView, operation_id="assign_mission")
@@ -249,8 +336,9 @@ async def assign_mission(
     body: MissionAssignBody,
     uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Assign a mission to a robot, readying it for dispatch without starting it.
+    """Set the robot a mission runs on by default, checking it can, without starting it.
 
     Identify the mission by mission_id and give the robot_id. To also start it, use
     dispatch_mission instead.
@@ -259,25 +347,13 @@ async def assign_mission(
         mission = await uc.assign(to_assign_command(mission_id, body.robot_id))
     except MissionNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    except RobotBusy as exc:
+    except (InvalidMissionTransition, RobotBusy, MissionArchived) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     except RobotFactsheetMissing as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    except (
-        StageNotHomogeneous,
-        UnsupportedStageKind,
-        UnknownSiteForRobot,
-        UnsupportedWaypointFrame,
-        IncompatibleTurningRadius,
-        ImplementNarrowerThanRobot,
-        RobotPhysicalParametersMissing,
-        StaleCoverageBoundary,
-    ) as exc:
+    except _ROBOT_FIT_ERRORS as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+    return await _view(mission.mission_id, repo, runs)
 
 
 @router.post("/{mission_id}/unassign", response_model=MissionView, operation_id="unassign_mission")
@@ -285,141 +361,127 @@ async def unassign_mission(
     mission_id: UUID,
     uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Remove the robot assignment from a mission that has not yet been dispatched.
-
-    Identify the mission by mission_id.
-    """
+    """Clear a mission's default robot. Identify the mission by mission_id."""
     try:
         mission = await uc.unassign(to_unassign_command(mission_id))
     except MissionNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
+    except (InvalidMissionTransition, MissionArchived) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+    return await _view(mission.mission_id, repo, runs)
 
 
 @router.post("/{mission_id}/dispatch", response_model=MissionView, operation_id="dispatch_mission")
 async def dispatch_mission(
     mission_id: UUID,
     body: MissionDispatchBody | None = None,
-    dispatch_uc=Depends(get_dispatch_use_case),
+    start_uc=Depends(get_run_start_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Dispatch a mission to a robot and start it driving.
+    """Start a run of a mission on a robot.
 
-    Sends the mission to its assigned robot, or to ``robot_id`` when given, and begins execution.
-    The mission must be in DRAFT or ASSIGNED; identify it by ``mission_id`` from list_missions.
+    Sends the mission's stages to its default robot, or to ``robot_id`` when given, and begins
+    execution. A mission can be run any number of times; each run keeps its own record. While a
+    run of this mission is active, a second one is refused (409). Identify the mission by
+    ``mission_id`` from list_missions. The returned ``latest_run`` is the new run.
     """
     try:
-        mission = await dispatch_uc.dispatch(
-            to_dispatch_command(mission_id, body.robot_id if body else None)
-        )
+        run = await start_uc.start(to_start_run_command(mission_id, body, current_run_origin()))
     except MissionNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
+    except (InvalidMissionTransition, RobotBusy, MissionRunInProgress, MissionArchived) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    except RobotBusy as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    except NoRobotAssigned as exc:
+    except (NoRobotAssigned, RobotFactsheetMissing, UnknownSite) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    except RobotFactsheetMissing as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
-    except (
-        StageNotHomogeneous,
-        UnsupportedStageKind,
-        UnknownSiteForRobot,
-        UnsupportedWaypointFrame,
-        IncompatibleTurningRadius,
-        ImplementNarrowerThanRobot,
-        RobotPhysicalParametersMissing,
-        StaleCoverageBoundary,
-    ) as exc:
+    except _ROBOT_FIT_ERRORS as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     except MissionRejectedByRobot as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     except MissionDispatchTimeout as exc:
         raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+    except MissionDispatchFailed as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
+    return await _view(run.mission_id, repo, runs)
+
+
+def _steer_errors(exc: Exception) -> HTTPException:
+    if isinstance(exc, MissionNotFoundError):
+        return HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
+    if isinstance(exc, RunNotFoundError):
+        return HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
+    return HTTPException(status.HTTP_409_CONFLICT, str(exc))
+
+
+_STEER_ERRORS = (MissionNotFoundError, RunNotFoundError, InvalidMissionTransition, AmbiguousRun)
 
 
 @router.post("/{mission_id}/cancel", response_model=MissionView, operation_id="cancel_mission")
 async def cancel_mission(
     mission_id: UUID,
-    uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
+    body: CancelBody | None = None,
+    uc: RunManagementUseCase = Depends(get_run_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Cancel a mission, stopping the robot if it is running.
+    """Cancel the mission's active run, stopping the robot.
 
-    Identify it by mission_id from list_missions.
+    Identify the mission by mission_id from list_missions. With more than one run active,
+    ``run_id`` says which. Both modes stop within seconds: 'graceful', the default, comes to a
+    controlled stop at the next safe point and then cleans up; 'immediate' stops at once.
     """
     try:
-        mission = await uc.cancel(to_cancel_command(mission_id))
-    except MissionNotFoundError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+        run = await uc.cancel(to_cancel_command(mission_id, body))
+    except _STEER_ERRORS as exc:
+        raise _steer_errors(exc)
+    return await _view(run.mission_id, repo, runs)
 
 
 @router.post("/{mission_id}/pause", response_model=MissionView, operation_id="pause_mission")
 async def pause_mission(
     mission_id: UUID,
-    uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
+    body: RunSelectBody | None = None,
+    uc: RunManagementUseCase = Depends(get_run_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Pause a running mission, holding the robot in place.
+    """Pause the mission's running run, holding the robot in place.
 
-    Identify the mission by mission_id. Use resume_mission to continue it.
+    Identify the mission by mission_id. Use resume_mission to continue it. With more than one
+    run active, ``run_id`` says which.
     """
     try:
-        mission = await uc.pause(to_pause_command(mission_id))
-    except MissionNotFoundError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+        run = await uc.pause(to_pause_command(mission_id, body.run_id if body else None))
+    except _STEER_ERRORS as exc:
+        raise _steer_errors(exc)
+    return await _view(run.mission_id, repo, runs)
 
 
 @router.post("/{mission_id}/resume", response_model=MissionView, operation_id="resume_mission")
 async def resume_mission(
     mission_id: UUID,
-    uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
+    body: RunSelectBody | None = None,
+    uc: RunManagementUseCase = Depends(get_run_management_use_case),
     repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Resume a paused mission, letting the robot continue.
+    """Resume the mission's paused run, letting the robot continue.
 
-    Identify it by mission_id.
+    Identify it by mission_id. With more than one run active, ``run_id`` says which.
     """
     try:
-        mission = await uc.resume(to_resume_command(mission_id))
-    except MissionNotFoundError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+        run = await uc.resume(to_resume_command(mission_id, body.run_id if body else None))
+    except _STEER_ERRORS as exc:
+        raise _steer_errors(exc)
+    return await _view(run.mission_id, repo, runs)
 
 
-@router.post("/{mission_id}/reset", response_model=MissionView, operation_id="reset_mission")
-async def reset_mission(
-    mission_id: UUID,
-    uc: MissionManagementUseCase = Depends(get_mission_management_use_case),
-    repo: MissionRepository = Depends(get_mission_repository),
-) -> MissionView:
-    """Return a failed or cancelled mission to draft so it can be edited and dispatched again.
-
-    Identify the mission by mission_id.
-    """
-    try:
-        mission = await uc.reset(to_reset_command(mission_id))
-    except MissionNotFoundError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except InvalidMissionTransition as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
-    record = await repo.get_record(mission.mission_id)
-    return to_mission_view(record)  # type: ignore[arg-type]
+@router.post("/{mission_id}/reset", operation_id="reset_mission", include_in_schema=False)
+async def reset_mission(mission_id: UUID) -> None:
+    """Removed: run a mission again with dispatch_mission; nothing needs resetting."""
+    raise HTTPException(
+        status.HTTP_410_GONE,
+        "reset no longer exists: dispatch the mission again; every run keeps its own record",
+    )

@@ -3,19 +3,21 @@
 The anti-corruption layer for the dispatch direction: proto types never leave
 the zenoh adapters, and every field is mapped explicitly so contract drift
 fails loudly here instead of corrupting a mission silently. The proto Mission
-is a projection ({mission_id, stages}); backend bookkeeping (name, timestamps,
-lifecycle) never reaches the robot wire.
+is a projection ({run_id, stages}): the robot is told which run it executes and
+the plan, and backend bookkeeping (name, timestamps, lifecycle) never reaches
+the wire.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from uuid import UUID
 
 from leitstand.robot.v1 import mission_pb2
 
+from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
 from leitstand_backend.domain.model.mission.mission import (
     CoverageStage,
-    Mission,
     NavigationStage,
     Segment,
     Stage,
@@ -100,20 +102,20 @@ def _stage_to_proto(stage: Stage) -> mission_pb2.Stage:
     raise TypeError(f"unmapped stage type: {type(stage).__name__}")
 
 
-def mission_to_proto(mission: Mission) -> mission_pb2.Mission:
-    """Project a domain mission onto the robot wire shape."""
+def run_to_proto(run_id: UUID, stages: list[Stage]) -> mission_pb2.Mission:
+    """Project a run (its id and the plan it executes) onto the robot wire shape."""
     return mission_pb2.Mission(
-        mission_id=str(mission.mission_id),
-        stages=[_stage_to_proto(s) for s in mission.stages],
+        run_id=str(run_id),
+        stages=[_stage_to_proto(s) for s in stages],
     )
 
 
 def dispatch_request_to_proto(
-    mission: Mission, dispatch_id: str
+    run_id: UUID, stages: list[Stage], dispatch_id: str
 ) -> mission_pb2.MissionDispatchRequest:
-    """Build the dispatch envelope carrying the mission projection."""
+    """Build the dispatch envelope carrying the run projection."""
     return mission_pb2.MissionDispatchRequest(
-        dispatch_id=dispatch_id, mission=mission_to_proto(mission)
+        dispatch_id=dispatch_id, mission=run_to_proto(run_id, stages)
     )
 
 
@@ -125,9 +127,9 @@ def dispatch_response_from_proto(
     return response.accepted, reason
 
 
-def cancel_to_proto(mission_id: UUID, mode: CancelMode) -> mission_pb2.CancelRequest:
-    """Build the cancel envelope for one mission."""
-    return mission_pb2.CancelRequest(mission_id=str(mission_id), mode=_CANCEL_MODE_TO_PROTO[mode])
+def cancel_to_proto(run_id: UUID, mode: CancelMode) -> mission_pb2.CancelRequest:
+    """Build the cancel envelope for one run."""
+    return mission_pb2.CancelRequest(run_id=str(run_id), mode=_CANCEL_MODE_TO_PROTO[mode])
 
 
 def _waypoint_from_proto(waypoint: mission_pb2.Waypoint) -> WGS84Waypoint | SiteLocalWaypoint:
@@ -151,7 +153,9 @@ def _waypoint_from_proto(waypoint: mission_pb2.Waypoint) -> WGS84Waypoint | Site
     raise ValueError(f"waypoint has no known frame arm set (got {arm!r})")
 
 
-def _stage_from_proto(stage: mission_pb2.Stage) -> Stage:
+def _stage_from_proto(
+    stage: mission_pb2.Stage, provenance: Mapping[UUID, CoverageProvenance] | None = None
+) -> Stage:
     """Rebuild a domain stage; reject unknown kinds and kind/payload mismatches."""
     arm = stage.WhichOneof("payload")
     on_cancel = [_stage_from_proto(s) for s in stage.on_cancel] or None
@@ -170,8 +174,15 @@ def _stage_from_proto(stage: mission_pb2.Stage) -> Stage:
             raise ValueError(
                 f"stage {stage.stage_id}: kind COVERAGE does not match payload arm {arm!r}"
             )
+        stage_id = UUID(stage.stage_id)
+        known = provenance.get(stage_id) if provenance else None
+        if known is None:
+            raise ValueError(
+                f"stage {stage_id}: a coverage stage's provenance is not carried on the wire, "
+                "so rebuilding one needs the provenance that was sent with it"
+            )
         return CoverageStage(
-            stage_id=UUID(stage.stage_id),
+            stage_id=stage_id,
             segments=[
                 Segment(
                     kind=_segment_kind_from_proto(segment.kind, stage.stage_id),
@@ -179,16 +190,20 @@ def _stage_from_proto(stage: mission_pb2.Stage) -> Stage:
                 )
                 for segment in stage.coverage.segments
             ],
+            provenance=known,
             on_cancel=on_cancel,
         )
     raise ValueError(f"unsupported stage kind {stage.kind} for stage {stage.stage_id}")
 
 
-def mission_projection_from_proto(mission: mission_pb2.Mission) -> tuple[UUID, list[Stage]]:
-    """Rebuild the projected fields from a proto mission.
+def run_projection_from_proto(
+    mission: mission_pb2.Mission,
+    provenance: Mapping[UUID, CoverageProvenance] | None = None,
+) -> tuple[UUID, list[Stage]]:
+    """Rebuild the projected fields (run id, stages) from a proto mission.
 
-    The wire carries only the projection, so a full domain ``Mission`` (name,
-    timestamps) is never reconstructed from it; this inverse exists for the
-    contract round-trip test and for receiver-side validation.
+    The wire carries only the projection, so this inverse serves the contract round-trip test and
+    receiver-side validation, never a full ``Mission``. A coverage stage's provenance is not sent
+    (a robot has no use for how its path was derived), so it must be supplied alongside.
     """
-    return UUID(mission.mission_id), [_stage_from_proto(s) for s in mission.stages]
+    return UUID(mission.run_id), [_stage_from_proto(s, provenance) for s in mission.stages]

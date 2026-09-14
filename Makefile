@@ -1,28 +1,31 @@
-.PHONY: dev-install dev-run check format ruff format-check pytest-cov openapi openapi-check ci migrate migrate-revision
+.PHONY: dev-install dev-run check test format ruff format-check pytest-cov \
+        openapi openapi-check ci migrate migrate-revision
 
 PYTHON ?= .venv/bin/python
+# PYTHONPATH is cleared because a sourced ROS workspace adds pytest plugins that break the suite.
+PYTEST = env PYTHONPATH= $(PYTHON) -m pytest -q
 
 dev-install:
 	$(PYTHON) -m pip install -e ../leitstand-robot-contract
 	$(PYTHON) -m pip install -e ".[dev]"
 
-# Deps in containers, backend native for fast iteration. The planner is a soft dependency, so a
-# missing or broken one costs coverage planning and not the backend, and it is rebuilt every time
-# because `up` alone would reuse an image built from older planner code.
+# Deps in containers, backend native for fast iteration.
 dev-run:
+	@[ -d secrets ] || cp -r secrets.example secrets
+	-docker compose stop backend 2>/dev/null
 	docker compose up -d --wait postgres zenoh-router
 	-docker compose up -d --build coverage-planner
 	LEITSTAND_COVERAGE_PLANNER_URL=$${LEITSTAND_COVERAGE_PLANNER_URL:-http://localhost:8090} \
 	    $(PYTHON) -m leitstand_backend
 
-check:
-	env PYTHONPATH= $(PYTHON) -m pytest -q
-	$(PYTHON) -m ruff check .
-	$(PYTHON) -m ruff format --check .
+check: ruff format-check test
+
+test:
+	$(PYTEST)
 
 format:
-	$(PYTHON) -m ruff format .
 	$(PYTHON) -m ruff check --fix .
+	$(PYTHON) -m ruff format .
 
 ruff:
 	$(PYTHON) -m ruff check .
@@ -31,8 +34,7 @@ format-check:
 	$(PYTHON) -m ruff format --check .
 
 pytest-cov:
-	env PYTHONPATH= $(PYTHON) -m pytest -q \
-	    --cov=leitstand_backend --cov-report=term --cov-report=xml
+	$(PYTEST) --cov=leitstand_backend --cov-report=term --cov-report=xml
 
 openapi:
 	$(PYTHON) scripts/dump_openapi.py
@@ -44,9 +46,7 @@ openapi-check:
 ci: ruff format-check pytest-cov openapi-check
 
 migrate:
-	env LEITSTAND_DATABASE_URL=$${LEITSTAND_DATABASE_URL:-postgresql+asyncpg://leitstand:leitstand@localhost:5432/leitstand} \
-	  $(PYTHON) -m alembic -c migrations/alembic.ini upgrade head
+	$(PYTHON) -m alembic -c migrations/alembic.ini upgrade head
 
 migrate-revision:
-	env LEITSTAND_DATABASE_URL=$${LEITSTAND_DATABASE_URL:-postgresql+asyncpg://leitstand:leitstand@localhost:5432/leitstand} \
-	  $(PYTHON) -m alembic -c migrations/alembic.ini revision --autogenerate -m "$(name)"
+	$(PYTHON) -m alembic -c migrations/alembic.ini revision --autogenerate -m "$(name)"

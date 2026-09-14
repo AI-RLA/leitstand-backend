@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
 
+from leitstand_backend.domain.model.mission.mission_run import MissionRunSummary
 from leitstand_backend.domain.model.robot.robot import Robot
 from leitstand_backend.domain.model.robot.robot_factsheet import RobotFactsheet
 from leitstand_backend.domain.model.robot.robot_status import RobotStatus
@@ -23,6 +24,9 @@ class RobotOverview(BaseModel):
     status: RobotStatus
     # Shown because the backend refuses dispatch on it, and an unexplained refusal reads as a fault.
     factsheet: RobotFactsheet | None = None
+    # What the robot is doing right now; None when idle. Answers the question a fleet view asks
+    # without a scan over every mission.
+    current_run: MissionRunSummary | None = None
 
 
 class FleetViewUseCase(ABC):

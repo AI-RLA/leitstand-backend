@@ -17,8 +17,8 @@ from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_mappers
     cancel_to_proto,
     dispatch_request_to_proto,
     dispatch_response_from_proto,
-    mission_projection_from_proto,
-    mission_to_proto,
+    run_projection_from_proto,
+    run_to_proto,
 )
 from leitstand_backend.domain.model.mission.mission import (
     CoverageStage,
@@ -28,6 +28,7 @@ from leitstand_backend.domain.model.mission.mission import (
 )
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
+from tests.fakes.planned_coverage import coverage_provenance
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -43,7 +44,7 @@ def _mission(*stages: NavigationStage) -> Mission:
 
 
 def _proto_mission(*stages: mission_pb2.Stage) -> mission_pb2.Mission:
-    return mission_pb2.Mission(mission_id=str(uuid4()), stages=list(stages))
+    return mission_pb2.Mission(run_id=str(uuid4()), stages=list(stages))
 
 
 def test_projection_roundtrip_with_both_waypoint_kinds_and_on_cancel() -> None:
@@ -56,23 +57,22 @@ def test_projection_roundtrip_with_both_waypoint_kinds_and_on_cancel() -> None:
         on_cancel=[NavigationStage(stage_id=uuid4(), waypoints=[WGS84Waypoint(lat=1.0, lon=1.0)])],
     )
     mission = _mission(stage)
-    mission_id, stages = mission_projection_from_proto(mission_to_proto(mission))
+    mission_id, stages = run_projection_from_proto(run_to_proto(mission.mission_id, mission.stages))
     assert mission_id == mission.mission_id
     assert stages == mission.stages
 
 
 def test_absent_heading_and_theta_stay_absent_on_the_wire() -> None:
-    proto = mission_to_proto(
-        _mission(
-            NavigationStage(
-                stage_id=uuid4(),
-                waypoints=[
-                    WGS84Waypoint(lat=0.0, lon=0.0),
-                    SiteLocalWaypoint(site_id=uuid4(), x=0.0, y=0.0),
-                ],
-            )
+    mission = _mission(
+        NavigationStage(
+            stage_id=uuid4(),
+            waypoints=[
+                WGS84Waypoint(lat=0.0, lon=0.0),
+                SiteLocalWaypoint(site_id=uuid4(), x=0.0, y=0.0),
+            ],
         )
     )
+    proto = run_to_proto(mission.mission_id, mission.stages)
     wgs84, site_local = proto.stages[0].navigation.waypoints
     assert not wgs84.wgs84.HasField("heading_deg")
     assert not site_local.site_local.HasField("theta")
@@ -82,7 +82,7 @@ def test_empty_on_cancel_roundtrips_to_none() -> None:
     mission = _mission(
         NavigationStage(stage_id=uuid4(), waypoints=[WGS84Waypoint(lat=0.0, lon=0.0)])
     )
-    _, stages = mission_projection_from_proto(mission_to_proto(mission))
+    _, stages = run_projection_from_proto(run_to_proto(mission.mission_id, mission.stages))
     assert stages[0].on_cancel is None
 
 
@@ -90,9 +90,9 @@ def test_dispatch_request_carries_dispatch_id_and_projection() -> None:
     mission = _mission(
         NavigationStage(stage_id=uuid4(), waypoints=[WGS84Waypoint(lat=0.0, lon=0.0)])
     )
-    request = dispatch_request_to_proto(mission, "dispatch-1")
+    request = dispatch_request_to_proto(mission.mission_id, mission.stages, "dispatch-1")
     assert request.dispatch_id == "dispatch-1"
-    assert request.mission.mission_id == str(mission.mission_id)
+    assert request.mission.run_id == str(mission.mission_id)
 
 
 def test_dispatch_response_reason_absent_maps_to_none() -> None:
@@ -112,13 +112,13 @@ def test_unknown_stage_kind_is_rejected() -> None:
         navigation=mission_pb2.NavigationStage(),
     )
     with pytest.raises(ValueError, match="unsupported stage kind"):
-        mission_projection_from_proto(_proto_mission(stage))
+        run_projection_from_proto(_proto_mission(stage))
 
 
 def test_kind_payload_mismatch_is_rejected() -> None:
     stage = mission_pb2.Stage(stage_id=str(uuid4()), kind=mission_pb2.STAGE_KIND_NAVIGATION)
     with pytest.raises(ValueError, match="does not match payload arm"):
-        mission_projection_from_proto(_proto_mission(stage))
+        run_projection_from_proto(_proto_mission(stage))
 
 
 def test_waypoint_without_frame_arm_is_rejected() -> None:
@@ -128,7 +128,7 @@ def test_waypoint_without_frame_arm_is_rejected() -> None:
         navigation=mission_pb2.NavigationStage(waypoints=[mission_pb2.Waypoint()]),
     )
     with pytest.raises(ValueError, match="no known frame arm"):
-        mission_projection_from_proto(_proto_mission(stage))
+        run_projection_from_proto(_proto_mission(stage))
 
 
 def test_cancel_modes_cover_every_declared_proto_mode() -> None:
@@ -141,7 +141,7 @@ def test_cancel_modes_cover_every_declared_proto_mode() -> None:
         if v.number != mission_pb2.CANCEL_MODE_UNSPECIFIED
     }
     assert mapped == declared
-    assert cancel_to_proto(mission_id, CancelMode.GRACEFUL).mission_id == str(mission_id)
+    assert cancel_to_proto(mission_id, CancelMode.GRACEFUL).run_id == str(mission_id)
 
 
 def test_stage_kind_descriptor_is_exhaustively_handled() -> None:
@@ -166,6 +166,7 @@ def test_a_coverage_stage_survives_the_round_trip() -> None:
     """
     stage = CoverageStage(
         stage_id=uuid4(),
+        provenance=coverage_provenance(),
         segments=[
             Segment(
                 kind="swath",
@@ -198,9 +199,34 @@ def test_a_coverage_stage_survives_the_round_trip() -> None:
         updated_at=_NOW,
     )
 
-    _, stages = mission_projection_from_proto(mission_to_proto(mission))
+    # Provenance has to be handed back in, which is the assertion: the wire carries the path and
+    # the identity, not how the path was derived.
+    _, stages = run_projection_from_proto(
+        run_to_proto(mission.mission_id, mission.stages),
+        {stage.stage_id: stage.provenance},
+    )
 
     assert stages == [stage]
+
+
+def test_a_coverage_stage_cannot_be_rebuilt_without_the_provenance_that_was_sent() -> None:
+    stage = CoverageStage(
+        stage_id=uuid4(),
+        provenance=coverage_provenance(),
+        segments=[
+            Segment(
+                kind="swath",
+                waypoints=[
+                    WGS84Waypoint(lat=52.0, lon=8.0),
+                    WGS84Waypoint(lat=52.001, lon=8.0),
+                ],
+            )
+        ],
+    )
+    proto = run_to_proto(uuid4(), [stage])
+
+    with pytest.raises(ValueError, match="not carried on the wire"):
+        run_projection_from_proto(proto)
 
 
 def test_a_coverage_payload_tagged_as_navigation_is_rejected() -> None:
@@ -222,4 +248,4 @@ def test_a_coverage_payload_tagged_as_navigation_is_rejected() -> None:
     )
 
     with pytest.raises(ValueError, match="does not match payload arm"):
-        mission_projection_from_proto(mission_pb2.Mission(mission_id=str(uuid4()), stages=[proto]))
+        run_projection_from_proto(mission_pb2.Mission(run_id=str(uuid4()), stages=[proto]))

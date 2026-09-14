@@ -22,12 +22,15 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     desc,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
+from leitstand_backend.domain.model.mission.run_lifecycle import ACTIVE_STATES
+from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.infrastructure.db import Base
 
 
@@ -92,61 +95,135 @@ class AuditLogRow(Base):
 
 
 class MissionRow(Base):
+    """A mission definition. Execution state lives on MissionRunRow; stages on MissionStageRow."""
+
     __tablename__ = "missions"
-    __table_args__ = (
-        Index("ix_missions_robot_id_status", "robot_id", "status"),
-        Index("ix_missions_status_dispatched", "status", "dispatched_at"),
-        Index("ix_missions_stages_gin", "stages", postgresql_using="gin"),
-    )
 
     mission_id: Mapped[UUID] = mapped_column(primary_key=True)
-    update_id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, default=0, server_default=text("0")
-    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'DRAFT'"))
-    stages: Mapped[list] = mapped_column(JSONB, nullable=False)
-    robot_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    dispatched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    assigned_robot_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
-    failure_errors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    # Null for a hand-authored mission. Denormalised rather than joined to the field, so the
-    # inputs a generated path was made from survive that field being edited or deleted.
-    coverage: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
-class MissionStageStateRow(Base):
-    """Current per-stage runtime state, one row per (mission, stage).
+class MissionStageRow(Base):
+    """One stage of a mission definition, flattened: a cleanup stage is a row under its parent.
 
-    The clean read model behind ``GET /missions/{id}/state``: upserted as robot frames
-    arrive and resolved at the terminal transition. ``header_id`` (the robot's per-frame
-    counter) orders concurrent writes; ``status`` is indexed for cross-mission queries
-    (e.g. stages cancelled).
+    Identity, order, kind and site are columns because they are queried and constrained; the
+    payload stays a JSONB ``spec`` because it is read whole and never queried.
     """
 
-    __tablename__ = "mission_stage_state"
+    __tablename__ = "mission_stages"
     __table_args__ = (
-        Index("ix_mission_stage_state_status", "status"),
-        Index("ix_mission_stage_state_mission_index", "mission_id", "stage_index"),
+        UniqueConstraint(
+            "mission_id",
+            "parent_stage_id",
+            "sequence",
+            name="uq_stage_order",
+            deferrable=True,
+            initially="DEFERRED",
+            postgresql_nulls_not_distinct=True,
+        ),
+        Index("ix_mission_stages_mission", "mission_id", "sequence"),
+        Index("ix_mission_stages_site", "site_id"),
     )
 
-    mission_id: Mapped[UUID] = mapped_column(primary_key=True)
+    stage_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mission_id: Mapped[UUID] = mapped_column(
+        ForeignKey("missions.mission_id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    site_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("sites.site_id", ondelete="RESTRICT"), nullable=True
+    )
+    parent_stage_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("mission_stages.stage_id", ondelete="CASCADE"), nullable=True
+    )
+    spec: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+# Derived from the domain, so the partial index cannot silently stop covering a state the queries
+# already include; enum order keeps the rendered SQL stable.
+_ACTIVE_PREDICATE = "status IN ({})".format(
+    ", ".join(f"'{s.value}'" for s in RunStatus if s in ACTIVE_STATES)
+)
+
+
+class MissionRunRow(Base):
+    """One execution of a mission, with a frozen copy of the stages it was dispatched with."""
+
+    __tablename__ = "mission_runs"
+    __table_args__ = (
+        Index(
+            "uq_run_robot_active",
+            "robot_id",
+            unique=True,
+            postgresql_where=text(_ACTIVE_PREDICATE),
+        ),
+        Index("ix_run_mission_active", "mission_id", postgresql_where=text(_ACTIVE_PREDICATE)),
+        Index("ix_run_mission_created", "mission_id", desc("created_at")),
+    )
+
+    run_id: Mapped[UUID] = mapped_column(primary_key=True)
+    mission_id: Mapped[UUID] = mapped_column(
+        ForeignKey("missions.mission_id", ondelete="RESTRICT"), nullable=False
+    )
+    robot_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    stages: Mapped[list] = mapped_column(JSONB, nullable=False)
+    stages_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    site_anchors: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    origin: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_errors: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_frame_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class StageRunRow(Base):
+    """Current per-stage runtime state of one run, one row per (run, stage).
+
+    Upserted as robot frames arrive, ordered by the robot's ``header_id``, and resolved at the
+    run's terminal transition. The robot's clock (``reported_*``, ``occurred_at``) is only ever
+    copied from a frame; ``recorded_at`` is the backend's and orders across runs.
+    """
+
+    __tablename__ = "stage_runs"
+    __table_args__ = (Index("ix_stage_runs_index", "run_id", "stage_index"),)
+
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("mission_runs.run_id", ondelete="RESTRICT"), primary_key=True
+    )
     stage_id: Mapped[UUID] = mapped_column(primary_key=True)
     header_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     stage_index: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     progress: Mapped[float] = mapped_column(Double, nullable=False, server_default=text("0"))
-    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    source_ts: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    reported_started_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    reported_ended_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    status_source: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class SiteRow(Base):
@@ -167,23 +244,6 @@ class SiteRow(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
-    )
-
-
-class MissionSiteRefRow(Base):
-    """Normalized index of which sites a (non-terminal) mission references.
-
-    Rebuilt from a mission's stages on every save, pruned when the mission goes
-    terminal, and repopulated on reset. Backs the site-in-use delete guard and
-    the site usage view; the FK enforces that a referenced site exists.
-    """
-
-    __tablename__ = "mission_site_refs"
-    __table_args__ = (Index("ix_mission_site_refs_site_id", "site_id"),)
-
-    mission_id: Mapped[UUID] = mapped_column(primary_key=True)
-    site_id: Mapped[UUID] = mapped_column(
-        ForeignKey("sites.site_id", ondelete="RESTRICT"), primary_key=True
     )
 
 

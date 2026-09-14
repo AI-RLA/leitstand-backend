@@ -80,13 +80,13 @@ each registered robot (`<id>` is the robot's slug) it consumes:
 | `leitstand/robot/<id>/metadata` | queryable | identity JSON (`{"id": "<id>", ...}`), queried once at registration |
 | `leitstand/robot/<id>/pose` | publication | pose telemetry |
 | `leitstand/robot/<id>/battery` | publication | battery telemetry |
+| `leitstand/robot/<id>/factsheet` | queryable | capability declaration |
+| `leitstand/robot/<id>/mission/_action/send_goal`, `.../cancel_goal` | queryable | dispatch, cancel |
+| `leitstand/robot/<id>/instant/pause`, `.../resume` | publication | pause, resume |
+| `leitstand/robot/<id>/mission/state` | publication | execution state |
 
-The backend also dispatches missions and consumes execution state, factsheets, and
-pause/resume over the `.../mission/*`, `.../factsheet`, and `.../instant/*` keys; the
-`leitstand-robot-contract` repo is the authoritative wire spec for those proto channels.
-The robot-side producer of all these keys is `leitstand-robot-client`. Full details
-(payload schemas, threading model) are in
-`leitstand_backend/adapters/inbound/messaging/zenoh/`.
+All payloads except `metadata` are the proto messages of `leitstand-robot-contract`; the robot
+side is `leitstand-robot-client`.
 
 ## HTTP REST API
 
@@ -102,8 +102,8 @@ a route or DTO changes. Commit it alongside the code change.
 
 ## Configuration
 
-All env vars are prefixed `LEITSTAND_` and read from process env
-or a `.env` file.
+All env vars are prefixed `LEITSTAND_` and read from process env, a `.env` file, or one
+bare-value file per secret under `secrets/` (`/run/secrets` in Docker), in that precedence.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -113,19 +113,25 @@ or a `.env` file.
 | `LEITSTAND_ZENOH_ENDPOINT` | `tcp/127.0.0.1:7447` | local `zenohd` to dial (client mode) |
 | `LEITSTAND_ZENOH_CONFIG` | unset | path to an explicit Zenoh JSON5 config (takes precedence over `_ENDPOINT`) |
 | `LEITSTAND_ZENOH_DISABLED` | `false` | skip the Zenoh subscriber entirely (HTTP-only mode) |
-| `LEITSTAND_DATABASE_URL` | `postgresql+asyncpg://leitstand:leitstand@localhost:5432/leitstand` | async SQLAlchemy URL |
+| `LEITSTAND_DATABASE_URL` | `postgresql+asyncpg://leitstand:leitstand@localhost:5432/leitstand` | async SQLAlchemy URL; without a password, `LEITSTAND_DB_PASSWORD` is inserted |
+| `LEITSTAND_DB_PASSWORD` | unset | normally `secrets/leitstand_db_password` |
 | `LEITSTAND_AUTO_MIGRATE` | `true` | run `alembic upgrade head` on startup |
 | `LEITSTAND_DB_POOL_SIZE` | `10` | SQLAlchemy connection pool size |
-| `LEITSTAND_AUTH_BEARER_TOKEN` | unset | required on REST and the WS handshake when set |
+| `LEITSTAND_AUTH_BEARER_TOKEN` | unset | required on REST and the WS handshake when set; normally `secrets/leitstand_auth_bearer_token` |
 | `LEITSTAND_CORS_ORIGINS` | empty | comma-separated or JSON list (middleware added only when non-empty) |
 | `LEITSTAND_LLM_BASE_URL` | `http://localhost:8000/v1` | any OpenAI-compatible endpoint |
-| `LEITSTAND_LLM_API_KEY` | unset | API key, if the endpoint needs one |
+| `LEITSTAND_LLM_API_KEY` | unset | API key, if the endpoint needs one; normally `secrets/leitstand_llm_api_key` |
 | `LEITSTAND_LLM_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | model name |
 | `LEITSTAND_LLM_CONNECT_TIMEOUT_S` | `3` | connect timeout |
 | `LEITSTAND_LLM_READ_TIMEOUT_S` | `60` | read timeout |
 | `LEITSTAND_LLM_REASONING` | `off` | `off` disables the model's chain of thought |
 | `LEITSTAND_CHAT_ENABLED` | `true` | expose `POST /api/v1/chat` |
 | `LEITSTAND_CHAT_MAX_TOOL_CALLS` | `10` | max tool calls per turn |
+| `LEITSTAND_COVERAGE_PLANNER_URL` | unset | coverage planner service; unset means coverage planning answers 503 |
+| `LEITSTAND_COVERAGE_PLANNER_CONNECT_TIMEOUT_S` | `3` | connect timeout |
+| `LEITSTAND_COVERAGE_PLANNER_READ_TIMEOUT_S` | `60` | read timeout |
+| `LEITSTAND_COVERAGE_TURN_SAMPLE_M` | `0.25` | point spacing along a planned turn, in metres |
+| `LEITSTAND_COVERAGE_LINEAR_CURV_CHANGE` | `200.0` | how fast curvature may change along a turn, in 1/m² |
 
 If the LLM is unreachable, only AI chat assistant fails.
 
@@ -136,13 +142,30 @@ delete any field. Real identity (OIDC) and per-user permissions are not built ye
 ## Deployment
 
 ```bash
-cp .env.example .env  # adjust if needed
-docker compose up --build
+cp .env.example .env            # adjust if needed
+cp -r secrets.example secrets   # dev defaults; fill in for a real deployment
+docker compose up -d --build
+cd ../leitstand-frontend && docker compose up -d --build   # UI at http://<host>/
 ```
 
-Starts Postgres, the Zenoh router, and the backend container.
-API at `http://localhost:8080`, Zenoh router at
-`tcp/localhost:7447`. Stop with `docker compose down`.
+Starts Postgres, the Zenoh router, the coverage planner and the backend. Zenoh router at
+`tcp/<host>:7447`; the API is on `127.0.0.1:8080` only (`BACKEND_BIND_ADDR` in `.env` widens
+it), the frontend stack reaches it over the shared `leitstand` network. Stop with
+`docker compose down` (`down -v` also deletes the database).
+
+`secrets/` holds one bare-value file per credential, mounted into the containers and never
+placed in the environment:
+
+| File | Value | Empty means |
+|---|---|---|
+| `leitstand_llm_api_key` | the LLM provider's key | chat runs without a key |
+| `leitstand_auth_bearer_token` | any string of `A-Za-z0-9._~+-` | the API is open |
+| `leitstand_db_password` | the Postgres password; the example holds the dev default | not allowed |
+
+After changing a file, `docker compose up -d --force-recreate` the containers that use it (the
+frontend stack reads the bearer too). Postgres reads its password only when it creates the data
+directory; on an existing volume run `ALTER USER leitstand PASSWORD '<new>'` via
+`docker compose exec postgres psql -U leitstand` before writing the same value into the file.
 
 For active Python development on the backend, see Development
 below.
@@ -167,7 +190,7 @@ make openapi       # regenerate openapi.json
 For fast iteration, run the stateful deps in compose and the backend natively:
 
 ```bash
-make dev-run       # docker compose up -d postgres zenoh-router, then the backend
+make dev-run       # postgres, zenoh-router and the planner in compose, then the backend
 ```
 
 ### Pre-commit hooks
@@ -186,3 +209,7 @@ YAML/TOML/large-file checks. Config in `.pre-commit-config.yaml`.
 make migrate                          # apply head
 make migrate-revision name="add foo"  # autogenerate a new revision
 ```
+
+## Contact
+
+Jannik Jose, jannik.jose@hs-osnabrueck.de

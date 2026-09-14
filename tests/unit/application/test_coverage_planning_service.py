@@ -20,7 +20,6 @@ from leitstand_backend.domain.errors import (
     CoveragePlanRejected,
     FieldNotFoundError,
     FieldNotPlannable,
-    MissionNotFoundError,
     RobotFactsheetMissing,
     RobotPhysicalParametersMissing,
     UnsupportedStageKind,
@@ -32,7 +31,6 @@ from leitstand_backend.domain.model.mission.coverage import (
     CoveragePlan,
     PlannedSegment,
 )
-from leitstand_backend.domain.model.mission.mission import MissionStatus
 from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
 from leitstand_backend.domain.model.robot.robot_factsheet import (
     CoverageCapability,
@@ -43,10 +41,10 @@ from leitstand_backend.domain.model.robot.robot_factsheet import (
 )
 from leitstand_backend.ports.inbound.coverage_planning import PlanCoverageCommand
 from tests.fakes.fake_coverage_planner import FakeCoveragePlanner
-from tests.fakes.fake_mission_dispatcher import FakeMissionDispatcher
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_field_repository import InMemoryFieldRepository
 from tests.fakes.in_memory_mission_repository import InMemoryMissionRepository
+from tests.fakes.in_memory_mission_run_repository import InMemoryMissionRunRepository
 from tests.fakes.in_memory_robot_factsheet_view import InMemoryRobotFactsheetView
 from tests.fakes.in_memory_site_repository import InMemorySiteRepository
 
@@ -182,13 +180,14 @@ def _make_svc(field: Field | None = None, plan: CoveragePlan | None = None):
     )
 
     missions = InMemoryMissionRepository()
+    runs = InMemoryMissionRunRepository()
 
     async def audit(action, target_type, target_id, payload):
         return None
 
     mission_uc = MissionManagementService(
         repo=missions,
-        dispatcher=FakeMissionDispatcher(),
+        runs=runs,
         factsheets=factsheets,
         events=InMemoryEventPublisher(),
         audit=audit,
@@ -225,10 +224,9 @@ async def test_a_plan_becomes_a_draft_mission_with_one_coverage_stage():
 
     mission = await svc.plan(_command(field))
 
-    record = await missions.get_record(mission.mission_id)
+    record = await missions.get(mission.mission_id)
     assert record is not None
-    assert record.status is MissionStatus.DRAFT
-    assert record.robot_id is None
+    assert record.assigned_robot_id is None
     assert len(mission.stages) == 1
     assert mission.stages[0].kind == "coverage"
 
@@ -343,17 +341,17 @@ async def test_the_mission_records_what_it_was_planned_from():
 
     mission = await svc.plan(_command(field))
 
-    record = await missions.get_record(mission.mission_id)
+    record = await missions.get(mission.mission_id)
     assert record is not None
-    assert record.coverage is not None
-    assert record.coverage.field_id == field.id
-    assert record.coverage.planned_for_robot_id == ROBOT_ID
+    provenance = record.stages[0].provenance
+    assert provenance.field_id == field.id
+    assert provenance.planned_for_robot_id == ROBOT_ID
     # The recorded params carry the angle the planner resolved, not the absent one it was asked
     # with, or a plan could never be reproduced against the layout it actually used.
-    assert record.coverage.params == _params(swath_angle_deg=PLANNED_ANGLE_DEG)
-    assert record.coverage.field_area_m2 == FIELD_AREA_M2
-    assert record.coverage.metrics.covered_area_m2 == COVERED_AREA_M2
-    assert record.coverage.planner_version == "fake 1"
+    assert provenance.params == _params(swath_angle_deg=PLANNED_ANGLE_DEG)
+    assert provenance.field_area_m2 == FIELD_AREA_M2
+    assert provenance.metrics.covered_area_m2 == COVERED_AREA_M2
+    assert provenance.planner_version == "fake 1"
 
 
 @pytest.mark.asyncio
@@ -378,8 +376,8 @@ async def test_the_sampling_the_path_was_built_at_is_recorded():
 
     (_, params) = planner.calls[0]
     assert params.turn_sample_m == TURN_SAMPLE_M
-    record = await missions.get_record(mission.mission_id)
-    assert record is not None and record.coverage is not None
+    record = await missions.get(mission.mission_id)
+    assert record is not None and record.stages[0].provenance is not None
 
 
 @pytest.mark.asyncio
@@ -482,52 +480,132 @@ async def test_an_unknown_field_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_a_replacing_plan_supersedes_the_one_it_names():
-    """Re-planning is how a generated plan is changed, so it must replace rather than accumulate."""
-    svc, field, _, missions, _ = _make_svc()
+async def test_re_planning_rewrites_the_mission_in_place():
+    """Re-planning is how a generated plan is changed; the mission keeps its id and its stage."""
+    svc, field, planner, missions, _ = _make_svc()
     first = await svc.plan(_command(field))
+    stage_id = first.stages[0].stage_id
+    planner.result = _plan(waypoints=_waypoints(8))
 
-    second = await svc.plan(_command(field).model_copy(update={"replaces": first.mission_id}))
+    second = await svc.plan(_command(field).model_copy(update={"replan": first.stages[0].stage_id}))
 
-    assert second.mission_id != first.mission_id
-    assert await missions.get_record(first.mission_id) is None
-    assert await missions.get_record(second.mission_id) is not None
+    assert second.mission_id == first.mission_id
+    assert second.stages[0].stage_id == stage_id
+    assert len(_mission_waypoints(second)) == 8
+    assert (await missions.get(first.mission_id)).stages[0].provenance.planned_at >= (
+        first.stages[0].provenance.planned_at
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_plan_of_a_different_field_is_not_superseded():
+async def test_re_planning_after_a_run_keeps_the_run_intact():
+    """The run carries the plan and provenance it executed; overwriting the definition's
+    changes nothing it holds."""
+    from leitstand_backend.domain.model.mission.mission_run import MissionRun, RunOrigin
+    from leitstand_backend.domain.model.mission.run_status import RunStatus
+    from leitstand_backend.domain.model.mission.stages_digest import stages_digest
+
+    svc, field, planner, missions, _ = _make_svc()
+    first = await svc.plan(_command(field))
+    record = await missions.get(first.mission_id)
+    runs = svc._missions._runs  # the fake behind the management service
+    run = await runs.create(
+        MissionRun(
+            run_id=uuid4(),
+            mission_id=first.mission_id,
+            robot_id=ROBOT_ID,
+            status=RunStatus.SUCCEEDED,
+            stages=first.stages,
+            stages_digest=stages_digest(first.stages),
+            origin=RunOrigin(kind="manual", actor="human"),
+            created_at=UTC_NOW,
+            updated_at=UTC_NOW,
+        )
+    )
+    planner.result = _plan(waypoints=_waypoints(8))
+
+    replanned = await svc.plan(
+        _command(field).model_copy(update={"replan": first.stages[0].stage_id})
+    )
+
+    again = await runs.get(run.run_id)
+    assert again.stages == first.stages
+    assert again.stages_digest == stages_digest(first.stages)
+    # The run's own copy of how its path was derived is untouched by the re-plan.
+    assert again.stages[0].provenance == record.stages[0].provenance
+    assert replanned.stages[0].stage_id == first.stages[0].stage_id
+    assert stages_digest(replanned.stages) != again.stages_digest
+
+
+@pytest.mark.asyncio
+async def test_a_plan_of_a_different_field_is_not_re_planned():
     svc, field, _, missions, _ = _make_svc()
     other = await svc.plan(_command(field))
-    # The stored plan claims a field this request is not covering.
-    await missions.save_coverage_provenance(
-        other.mission_id,
-        (await missions.get_record(other.mission_id)).coverage.model_copy(
-            update={"field_id": uuid4()}
-        ),
+    # The stored path claims a field this request is not covering.
+    stored = await missions.get(other.mission_id)
+    stage = stored.stages[0]
+    await missions.save(
+        stored.model_copy(
+            update={
+                "stages": [
+                    stage.model_copy(
+                        update={
+                            "provenance": stage.provenance.model_copy(update={"field_id": uuid4()})
+                        }
+                    )
+                ]
+            }
+        )
     )
 
     with pytest.raises(CoveragePlanRejected):
-        await svc.plan(_command(field).model_copy(update={"replaces": other.mission_id}))
-
-    assert await missions.get_record(other.mission_id) is not None
+        await svc.plan(_command(field).model_copy(update={"replan": stage.stage_id}))
 
 
 @pytest.mark.asyncio
-async def test_a_mission_that_was_not_planned_is_not_superseded():
-    """A hand-authored mission is not a re-derivable plan, so replacing it would lose real work."""
+async def test_a_stage_that_does_not_exist_is_not_re_planned():
+    """Only a coverage stage can be superseded, so an unknown id overwrites nothing."""
     svc, field, _, missions, _ = _make_svc()
-    typed = await svc.plan(_command(field))
-    missions._coverage.pop(typed.mission_id)
+    await svc.plan(_command(field))
 
     with pytest.raises(CoveragePlanRejected):
-        await svc.plan(_command(field).model_copy(update={"replaces": typed.mission_id}))
-
-    assert await missions.get_record(typed.mission_id) is not None
+        await svc.plan(_command(field).model_copy(update={"replan": uuid4()}))
 
 
 @pytest.mark.asyncio
-async def test_replacing_a_mission_that_does_not_exist_is_refused():
+async def test_re_planning_a_stage_that_does_not_exist_is_refused():
     svc, field, _, _, _ = _make_svc()
 
-    with pytest.raises(MissionNotFoundError):
-        await svc.plan(_command(field).model_copy(update={"replaces": uuid4()}))
+    with pytest.raises(CoveragePlanRejected):
+        await svc.plan(_command(field).model_copy(update={"replan": uuid4()}))
+
+
+@pytest.mark.asyncio
+async def test_a_coverage_stage_nested_under_on_cancel_is_re_planned():
+    """The planner resolves its target through the whole tree, so the rewrite must reach as far."""
+    from leitstand_backend.domain.model.mission.mission import NavigationStage
+
+    svc, field, planner, missions, _ = _make_svc()
+    first = await svc.plan(_command(field))
+    stored = await missions.get(first.mission_id)
+    coverage = stored.stages[0]
+    await missions.save(
+        stored.model_copy(
+            update={
+                "stages": [
+                    NavigationStage(
+                        stage_id=uuid4(),
+                        waypoints=_waypoints(2),
+                        on_cancel=[coverage],
+                    )
+                ]
+            }
+        )
+    )
+    planner.result = _plan(waypoints=_waypoints(8))
+
+    replanned = await svc.plan(_command(field).model_copy(update={"replan": coverage.stage_id}))
+
+    nested = replanned.stages[0].on_cancel[0]
+    assert nested.stage_id == coverage.stage_id
+    assert nested != coverage

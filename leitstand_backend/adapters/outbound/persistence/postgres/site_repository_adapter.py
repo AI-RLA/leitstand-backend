@@ -7,16 +7,14 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from geojson_pydantic import Polygon
-from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from leitstand_backend.adapters.outbound.persistence.postgres.models import SiteRow
-from leitstand_backend.domain.errors import SiteInUse
-from leitstand_backend.domain.model.mission.mission_lifecycle import TERMINAL_STATES
+from leitstand_backend.adapters.outbound.persistence.postgres.models import (
+    SiteRow,
+)
 from leitstand_backend.domain.model.site import Site
 from leitstand_backend.ports.outbound.site_repository import SiteRepository
-
-_TERMINAL_STATUSES = tuple(status.value for status in TERMINAL_STATES)
 
 
 class PostgresSiteRepositoryAdapter(SiteRepository):
@@ -99,33 +97,9 @@ class PostgresSiteRepositoryAdapter(SiteRepository):
         return _to_domain(row) if row else None
 
     async def delete(self, site_id: UUID) -> bool:
-        blocking = await self._find_blocking_missions(site_id)
-        if blocking:
-            raise SiteInUse(site_id, blocking)
         stmt = delete(SiteRow).where(SiteRow.site_id == site_id)
         result = await self._session.execute(stmt)
         return result.rowcount > 0
-
-    async def _find_blocking_missions(self, site_id: UUID) -> list[UUID]:
-        """Return mission_ids of non-terminal missions referencing this site_id.
-
-        Reads the normalized ``mission_site_refs`` index (maintained on mission
-        save / reset, pruned on terminal), which already captures site refs nested
-        inside ``on_cancel`` cleanup stages. The terminal filter is belt-and-braces:
-        terminal missions are pruned from the index.
-        """
-        stmt = text("""
-            SELECT m.mission_id::text
-            FROM mission_site_refs r
-            JOIN missions m ON m.mission_id = r.mission_id AND m.update_id = 0
-            WHERE r.site_id = :site_id
-              AND NOT (m.status = ANY(:terminal_statuses))
-        """).bindparams(
-            site_id=str(site_id),
-            terminal_statuses=list(_TERMINAL_STATUSES),
-        )
-        result = await self._session.execute(stmt)
-        return [UUID(row[0]) for row in result]
 
 
 def _to_domain(row: SiteRow) -> Site:

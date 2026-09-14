@@ -12,7 +12,7 @@ authors = [
 dependencies = [
     "eclipse-zenoh>=1.0.0",
     "pydantic>=2.6",
-    "pydantic-settings>=2.2",
+    "pydantic-settings>=2.5",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "structlog>=24.1",
@@ -21,7 +21,7 @@ dependencies = [
     "alembic==1.14.0",
     "geojson-pydantic==1.2.0",
     "geoalchemy2==0.16.0",
-    "leitstand-robot-contract==0.2.0",
+    "leitstand-robot-contract==0.3.0",
     "protobuf>=7.35.1",
     "pydantic-ai-slim[openai]==2.26.0",
     "fastmcp==3.4.6",
@@ -76,5 +76,8 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "--tb=short"
+addopts = "--tb=short -m 'not integration'"
+markers = [
+    "integration: needs a live Postgres at LEITSTAND_DATABASE_URL, migrated to head",
+]
 pythonpath = [".", "tests"]

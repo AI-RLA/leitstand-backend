@@ -73,7 +73,9 @@ def token_accepted(settings: Settings, token: str | None) -> bool:
         return True
     if token is None:
         return False
-    return secrets.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
+    return secrets.compare_digest(
+        token.encode("utf-8"), expected.get_secret_value().encode("utf-8")
+    )
 
 
 def authenticate(settings: Settings, authorization: str | None) -> User:

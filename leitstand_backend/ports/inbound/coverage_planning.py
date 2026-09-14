@@ -32,9 +32,13 @@ class PlanCoverageCommand(BaseModel):
         default=False,
         description="Overlap the last pass to cover the remainder rather than leave it unworked.",
     )
-    replaces: UUID | None = Field(
+    replan: UUID | None = Field(
         default=None,
-        description="A coverage mission over the same field that this plan supersedes.",
+        description=(
+            "Re-plan this coverage stage in place instead of creating a mission. Its mission "
+            "keeps its id, its other stages and its past runs; only this stage's path and "
+            "provenance change, and it keeps its own id so its history joins up."
+        ),
     )
 
 

@@ -50,3 +50,23 @@ def test_no_configured_token_leaves_the_socket_open() -> None:
     with TestClient(app) as client:
         with client.websocket_connect("/ws/v1") as ws:
             assert ws.receive_json().get("type") == "hello"
+
+
+def test_an_authorization_header_on_the_handshake_connects() -> None:
+    """A reverse proxy holding the token attaches a header; the browser behind it offers none."""
+    with TestClient(_closed()) as client:
+        with client.websocket_connect(
+            "/ws/v1",
+            subprotocols=["leitstand.v1"],
+            headers={"Authorization": f"Bearer {_TOKEN}"},
+        ) as ws:
+            assert ws.receive_json().get("type") == "hello"
+
+
+def test_a_wrong_header_is_not_rescued_by_no_subprotocol() -> None:
+    with TestClient(_closed()) as client:
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/ws/v1", subprotocols=["leitstand.v1"], headers={"Authorization": "Bearer nope"}
+            ) as ws:
+                ws.receive_json()

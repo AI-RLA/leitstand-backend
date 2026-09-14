@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from leitstand_backend.domain.errors import SiteNotFoundError
+from leitstand_backend.domain.errors import SiteInUse, SiteNotFoundError
 from leitstand_backend.domain.model.site import Site
 from leitstand_backend.ports.inbound.site_management import (
     CreateSiteCommand,
@@ -11,12 +11,14 @@ from leitstand_backend.ports.inbound.site_management import (
     UpdateSiteCommand,
 )
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
+from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 from leitstand_backend.ports.outbound.site_repository import SiteRepository
 
 
 class SiteManagementService(SiteManagementUseCase):
-    def __init__(self, repo: SiteRepository, audit: AuditWriter):
+    def __init__(self, repo: SiteRepository, missions: MissionRepository, audit: AuditWriter):
         self._repo = repo
+        self._missions = missions
         self._audit = audit
 
     async def create(self, command: CreateSiteCommand) -> Site:
@@ -67,9 +69,18 @@ class SiteManagementService(SiteManagementUseCase):
         return updated
 
     async def delete(self, command: DeleteSiteCommand) -> None:
+        """Delete a site nothing has ever driven in.
+
+        Site-local positions are measured against the site's anchor, so any mission that used it,
+        archived or not, keeps it. The check asks the mission repository so the site store need
+        not know about missions.
+        """
         site = await self._repo.get(command.site_id)
         if site is None:
             raise SiteNotFoundError(command.site_id)
+        blocking = await self._missions.missions_referencing_site(command.site_id)
+        if blocking:
+            raise SiteInUse(command.site_id, blocking)
         snapshot = site.model_dump(mode="json")
 
         await self._audit("site.delete", "site", str(command.site_id), snapshot)

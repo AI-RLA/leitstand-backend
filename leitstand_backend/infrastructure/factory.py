@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from uuid import UUID
@@ -37,6 +38,7 @@ from leitstand_backend.adapters.inbound.web.chat.routes import router as chat_ro
 from leitstand_backend.adapters.inbound.web.fields.routes import router as fields_router
 from leitstand_backend.adapters.inbound.web.missions.routes import router as missions_router
 from leitstand_backend.adapters.inbound.web.robots.routes import router as robots_router
+from leitstand_backend.adapters.inbound.web.runs.routes import router as runs_router
 from leitstand_backend.adapters.inbound.web.shared.health import router as health_router
 from leitstand_backend.adapters.inbound.web.sites.routes import router as sites_router
 from leitstand_backend.adapters.inbound.web.users.routes import router as users_router
@@ -49,8 +51,8 @@ from leitstand_backend.adapters.outbound.llm.domain_mcp import build_domain_mcp
 from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_dispatcher_adapter import (
     ZenohMissionDispatcherAdapter,
 )
-from leitstand_backend.adapters.outbound.persistence.postgres.mission_repository_adapter import (
-    PostgresMissionRepositoryAdapter,
+from leitstand_backend.adapters.outbound.persistence.postgres.mission_run_repository_adapter import (
+    PostgresMissionRunRepositoryAdapter,
 )
 from leitstand_backend.adapters.outbound.persistence.postgres.models import RobotRow
 from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_adapter import (
@@ -63,10 +65,11 @@ from leitstand_backend.application.mission_state_service import MissionStateServ
 from leitstand_backend.application.robot_connectivity_service import RobotConnectivityService
 from leitstand_backend.application.robot_factsheet_service import RobotFactsheetService
 from leitstand_backend.application.robot_telemetry_service import RobotTelemetryService
+from leitstand_backend.application.run_reconciliation import reconcile_robot_runs
 from leitstand_backend.domain import event_topics
 from leitstand_backend.domain.errors import CoveragePlannerUnavailable
 from leitstand_backend.domain.model.mission.coverage import CoverageParams, CoveragePlan
-from leitstand_backend.domain.model.mission.mission import Mission
+from leitstand_backend.domain.model.mission.mission import Stage
 from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.infrastructure.auth import CredentialContextMiddleware
 from leitstand_backend.infrastructure.db import (
@@ -118,12 +121,26 @@ async def _db_unavailable(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+def alembic_url_option(database_url: str) -> str:
+    """Escape a URL for alembic's ini parser, which interpolates `%`; an encoded password has them."""
+    return database_url.replace("%", "%%")
+
+
 def _run_migrations(database_url: str) -> None:
     """Run alembic upgrade head against the configured DB."""
     ini = Path(__file__).resolve().parents[2] / "migrations" / "alembic.ini"
     cfg = AlembicConfig(str(ini))
-    cfg.set_main_option("sqlalchemy.url", database_url)
+    # env.py takes the URL from here, so the app's settings win over the ones it would build.
+    cfg.attributes["database_url"] = database_url
+    # The ini's logging config would replace the process's own and silence uvicorn's errors.
+    cfg.attributes["configure_logger"] = False
     alembic_command.upgrade(cfg, "head")
+
+
+# How long a reconnected robot has to mention the runs it holds before the backend treats it
+# as not having them. The client republishes state every few seconds while executing, so
+# this is many heartbeats.
+_RECONCILE_GRACE_S = 30.0
 
 
 async def _bulk_mark_offline(session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -156,21 +173,21 @@ async def _seed_event_bus_from_db(
 class _NullMissionDispatcher(MissionDispatcher):
     """No-op dispatcher used when Zenoh is disabled (dev/test)."""
 
-    async def dispatch(self, mission: Mission, robot_id: str) -> None:
+    async def dispatch(self, run_id: UUID, stages: list[Stage], robot_id: str) -> None:
         pass
 
     async def cancel(
         self,
-        mission_id: UUID,
+        run_id: UUID,
         robot_id: str,
         mode: CancelMode = CancelMode.GRACEFUL,
     ) -> None:
         pass
 
-    async def pause(self, mission_id: UUID, robot_id: str) -> None:
+    async def pause(self, run_id: UUID, robot_id: str) -> None:
         pass
 
-    async def resume(self, mission_id: UUID, robot_id: str) -> None:
+    async def resume(self, run_id: UUID, robot_id: str) -> None:
         pass
 
 
@@ -224,16 +241,16 @@ class _SessionScopedMissionStateUseCase(MissionStateUseCase):
 
     async def record(self, command) -> None:
         async with transactional_scope(self._session_factory) as s:
-            repo = PostgresMissionRepositoryAdapter(s)
             await MissionStateService(
-                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+                runs=PostgresMissionRunRepositoryAdapter(s),
+                events=TransactionBoundEventPublisher(s, self._bus),
             ).record(command)
 
     async def handle_robot_offline(self, command) -> None:
         async with transactional_scope(self._session_factory) as s:
-            repo = PostgresMissionRepositoryAdapter(s)
             await MissionStateService(
-                repo=repo, events=TransactionBoundEventPublisher(s, self._bus)
+                runs=PostgresMissionRunRepositoryAdapter(s),
+                events=TransactionBoundEventPublisher(s, self._bus),
             ).handle_robot_offline(command)
 
 
@@ -280,6 +297,7 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
         loop: asyncio.AbstractEventLoop,
         factsheet_adapter: ZenohRobotFactsheetAdapter | None = None,
         mission_state_uc: MissionStateUseCase | None = None,
+        mission_dispatcher: MissionDispatcher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._bus = bus
@@ -288,8 +306,10 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
         self._loop = loop
         self._factsheet_adapter = factsheet_adapter
         self._mission_state_uc = mission_state_uc
+        self._mission_dispatcher = mission_dispatcher
         self._data_adapters: dict[str, ZenohRobotTelemetryAdapter] = {}
         self._adapters_lock = threading.Lock()
+        self._reconcile_tasks: set[asyncio.Task] = set()
 
     async def record_online(self, command: RecordOnlineCommand):
         async with transactional_scope(self._session_factory) as s:
@@ -312,7 +332,30 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
             asyncio.get_running_loop().run_in_executor(
                 None, self._factsheet_adapter.fetch_and_record, command.robot_id
             )
+        if self._mission_dispatcher is not None:
+            task = asyncio.get_running_loop().create_task(
+                self._reconcile_when_settled(command.robot_id, datetime.now(timezone.utc))
+            )
+            self._reconcile_tasks.add(task)
+            task.add_done_callback(self._reconcile_tasks.discard)
         return robot
+
+    async def _reconcile_when_settled(self, robot_id: str, since: datetime) -> None:
+        """Give a reconnected robot time to claim its runs, then settle the ones it did not."""
+        try:
+            await asyncio.sleep(_RECONCILE_GRACE_S)
+            async with transactional_scope(self._session_factory) as s:
+                await reconcile_robot_runs(
+                    PostgresMissionRunRepositoryAdapter(s),
+                    self._mission_dispatcher,
+                    TransactionBoundEventPublisher(s, self._bus),
+                    robot_id,
+                    since,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a background sweep must not take the loop down
+            logger.exception("run_reconciliation_failed", robot_id=robot_id)
 
     async def record_offline(self, command: RecordOfflineCommand):
         async with transactional_scope(self._session_factory) as s:
@@ -338,6 +381,15 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
             # forwarding liveliness DELETE events for other robots going offline.
             asyncio.get_running_loop().run_in_executor(None, adapter.close)
         return robot
+
+    async def aclose(self) -> None:
+        """Stop the telemetry adapters and any reconcile still waiting out its grace window."""
+        self.shutdown()
+        tasks = list(self._reconcile_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def shutdown(self) -> None:
         with self._adapters_lock:
@@ -431,6 +483,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 loop=loop,
                 factsheet_adapter=factsheet_adapter,
                 mission_state_uc=mission_state_uc,
+                mission_dispatcher=mission_dispatcher,
             )
             # Start the projector and latch initial statuses before connectivity, so it
             # does not miss the liveliness online burst replayed on subscribe.
@@ -483,6 +536,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.info("chat_disabled")
 
         logger.info("leitstand_started", endpoint=settings.zenoh_endpoint)
+        if settings.auth_bearer_token is None:
+            logger.warning("auth_disabled", reason="no auth_bearer_token; every caller is accepted")
 
         try:
             yield
@@ -513,7 +568,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception:  # noqa: BLE001
                     logger.warning("connectivity_adapter_close_error")
             if connectivity_uc is not None:
-                connectivity_uc.shutdown()
+                await connectivity_uc.aclose()
             if z_ctx is not None:
                 try:
                     await z_ctx.__aexit__(None, None, None)
@@ -552,6 +607,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(fields_router, dependencies=protected)
     app.include_router(robots_router, dependencies=protected)
     app.include_router(missions_router, dependencies=protected)
+    app.include_router(runs_router, dependencies=protected)
     app.include_router(sites_router, dependencies=protected)
     app.include_router(users_router, dependencies=protected)
     app.include_router(ws_router)

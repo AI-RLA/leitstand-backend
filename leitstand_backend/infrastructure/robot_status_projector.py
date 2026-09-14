@@ -24,13 +24,12 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from uuid import UUID
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from leitstand_backend.adapters.outbound.persistence.postgres.mission_repository_adapter import (
-    PostgresMissionRepositoryAdapter,
+from leitstand_backend.adapters.outbound.persistence.postgres.mission_run_repository_adapter import (
+    PostgresMissionRunRepositoryAdapter,
 )
 from leitstand_backend.adapters.outbound.persistence.postgres.robot_repository_adapter import (
     PostgresRobotRepositoryAdapter,
@@ -50,10 +49,6 @@ _RECONCILE_INTERVAL_S = 30.0
 
 class RobotStatusReadModel(ABC):
     """The backend-owned facts the projector reads to derive and target status."""
-
-    @abstractmethod
-    async def assigned_robot(self, mission_id: UUID) -> str | None:
-        """Return the robot a mission is assigned to, or None."""
 
     @abstractmethod
     async def compute_status(self, robot_id: str) -> RobotStatus | None:
@@ -79,15 +74,11 @@ class SessionScopedRobotStatusReadModel(RobotStatusReadModel):
         self._session_factory = session_factory
         self._state_view = state_view
 
-    async def assigned_robot(self, mission_id: UUID) -> str | None:
-        async with transactional_scope(self._session_factory) as session:
-            return await PostgresMissionRepositoryAdapter(session).get_assigned_robot(mission_id)
-
     async def compute_status(self, robot_id: str) -> RobotStatus | None:
         async with transactional_scope(self._session_factory) as session:
             service = RobotStatusService(
                 PostgresRobotRepositoryAdapter(session),
-                PostgresMissionRepositoryAdapter(session),
+                PostgresMissionRunRepositoryAdapter(session),
                 self._state_view,
             )
             return await service.compute(robot_id)
@@ -154,10 +145,11 @@ class RobotStatusProjector:
         if topic == self._REGISTRY_PREFIX:
             return payload.get("robot_id") if isinstance(payload, dict) else None
         segments = topic.split("/")
-        # Only mission lifecycle transitions move a robot between active and idle;
-        # the latched .../state telemetry frame is ignored.
+        # Only run lifecycle transitions move a robot between active and idle; the latched
+        # .../state telemetry frame is ignored. The event names its robot, because the run's
+        # robot need not be the mission's default one.
         if len(segments) >= 4 and segments[3] == "lifecycle":
-            return await self._read.assigned_robot(UUID(segments[2]))
+            return payload.get("robot_id") if isinstance(payload, dict) else None
         return None
 
     async def _recompute(self, robot_id: str) -> None:

@@ -73,7 +73,7 @@ _WRITE_ROUTES = (
     (r"^/api/v1/missions/\{mission_id\}/cancel$", ["POST"]),
     (r"^/api/v1/missions/\{mission_id\}/pause$", ["POST"]),
     (r"^/api/v1/missions/\{mission_id\}/resume$", ["POST"]),
-    (r"^/api/v1/missions/\{mission_id\}/reset$", ["POST"]),
+    (r"^/api/v1/missions/\{mission_id\}/restore$", ["POST"]),
     (r"^/api/v1/fields/$", ["POST"]),
     (r"^/api/v1/fields/\{field_id\}$", ["PATCH", "DELETE"]),
     (r"^/api/v1/sites/$", ["POST"]),
@@ -99,8 +99,14 @@ _WHEN_TO_CALL = {
     ),
     "list_missions": (
         "Call this for any question about which missions exist or their status, including whether "
-        "one is finished, running or failed. It returns each mission's status, so a question "
-        "naming a mission in words is answered by passing that name and reading the status back."
+        "one is finished, running or failed. Each mission carries its latest run, whose status is "
+        "the mission's current state; null means it has never run. A question naming a mission "
+        "in words is answered by passing that name and reading the latest run back."
+    ),
+    "dispatch_mission": (
+        "Call this to run a mission, including one that has run before: every run keeps its own "
+        "record and nothing is reset. While a run of the same mission is still active it is "
+        "refused: wait for it to end, or cancel it first."
     ),
     "get_mission": "Call this for the full definition of one mission whose id you already have.",
     "get_mission_state": (
@@ -127,10 +133,11 @@ _WHEN_TO_CALL = {
         "id, and nothing here resolves one to the other. The robot you name decides the plan's "
         "shape, because its declared turning radius is what every turn is laid out to, and is "
         "also the headland unless the operator states one. Say which robot you used. "
-        "To change an existing plan, pass its id as replaces: a plan is re-derived rather than "
-        "edited, and without it you leave the operator holding two missions for one field. "
-        "Doing so returns a new mission with a new id and removes the old one, so report it "
-        "as a replacement naming both ids, never as the same mission having been updated. "
+        "To change an existing path, pass its coverage stage's id as replan: a path is "
+        "re-derived rather than edited, and without it you leave the operator holding two "
+        "missions for one field. The mission keeps its id, its name, its other stages and "
+        "every run it has had; only that stage's path changes, so report it as the same "
+        "mission re-planned. "
         "When the result reports a max_excursion_m above zero, say so and give the number: the "
         "machine leaves the field by that much, and only the operator knows what the edge is. "
         "covered_area_m2 is clipped to the field boundary, so it never exceeds field_area_m2. "

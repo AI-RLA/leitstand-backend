@@ -1,7 +1,8 @@
-"""Postgres-backed MissionRepository."""
+"""Postgres-backed MissionRepository: the definition and its stages as rows."""
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -12,28 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from leitstand_backend.adapters.outbound.persistence.postgres.models import (
     MissionRow,
-    MissionSiteRefRow,
-    MissionStageStateRow,
+    MissionStageRow,
 )
-from leitstand_backend.domain.errors import MissionNotFoundError
-from leitstand_backend.domain.model.mission.coverage import CoverageProvenance
-from leitstand_backend.domain.model.mission.mission import (
-    Mission,
-    MissionStatus,
-    Stage,
-    referenced_site_ids,
-)
-from leitstand_backend.domain.model.mission.mission_lifecycle import EXECUTING_STATES, is_terminal
-from leitstand_backend.domain.model.mission.mission_state import MissionError
-from leitstand_backend.domain.model.mission.stage_state_record import StageStateRecord
-from leitstand_backend.ports.outbound.mission_repository import MissionRecord, MissionRepository
-
-_TERMINAL_STATUSES = (
-    MissionStatus.SUCCEEDED.value,
-    MissionStatus.FAILED.value,
-    MissionStatus.CANCELLED.value,
-)
-_EXECUTING_STATUSES = tuple(s.value for s in EXECUTING_STATES)
+from leitstand_backend.domain.model.mission.mission import Mission, Stage, stage_waypoints
+from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint
+from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 
 # Stage is a discriminated union rather than a class, so it is validated through an
 # adapter. Built once: constructing one per row would rebuild the schema on every read.
@@ -45,343 +29,206 @@ class PostgresMissionRepositoryAdapter(MissionRepository):
         self._session = session
 
     async def save(self, mission: Mission) -> Mission:
-        stages_json = [s.model_dump(mode="json") for s in mission.stages]
         stmt = (
             pg_insert(MissionRow)
             .values(
                 mission_id=mission.mission_id,
-                update_id=mission.update_id,
                 name=mission.name,
                 description=mission.description,
-                status=MissionStatus.DRAFT.value,
-                stages=stages_json,
-                robot_id=None,
-                dispatched_at=None,
+                assigned_robot_id=mission.assigned_robot_id,
+                archived_at=mission.archived_at,
                 created_at=mission.created_at,
                 updated_at=mission.updated_at,
             )
             .on_conflict_do_update(
-                index_elements=[MissionRow.mission_id, MissionRow.update_id],
+                index_elements=[MissionRow.mission_id],
                 set_={
                     "name": mission.name,
                     "description": mission.description,
-                    "stages": stages_json,
                     "updated_at": mission.updated_at,
                 },
             )
             .returning(MissionRow)
         )
         row = (await self._session.execute(stmt)).scalar_one()
-        await self._sync_site_refs(mission.mission_id, mission.stages)
-        return _to_domain(row)
+        await self.replace_stages(mission.mission_id, mission.stages)
+        return _to_domain(row, mission.stages)
 
-    async def get(self, mission_id: UUID, update_id: int = 0) -> Mission | None:
-        row = await self._session.get(MissionRow, (mission_id, update_id))
-        return _to_domain(row) if row else None
+    async def get(self, mission_id: UUID) -> Mission | None:
+        row = await self._session.get(MissionRow, mission_id)
+        if row is None:
+            return None
+        return _to_domain(row, await self.get_stages(mission_id))
 
-    async def list(self) -> list[Mission]:
-        stmt = select(MissionRow).order_by(MissionRow.created_at.desc())
-        result = await self._session.execute(stmt)
-        return [_to_domain(row) for row in result.scalars()]
-
-    async def list_by_robot(self, robot_id: str) -> list[Mission]:
-        stmt = (
-            select(MissionRow)
-            .where(MissionRow.robot_id == robot_id)
-            .order_by(MissionRow.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        return [_to_domain(row) for row in result.scalars()]
-
-    async def list_active_by_robot(self, robot_id: str) -> list[Mission]:
-        stmt = (
-            select(MissionRow)
-            .where(MissionRow.robot_id == robot_id)
-            .where(MissionRow.status.notin_(_TERMINAL_STATUSES))
-            .order_by(MissionRow.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        return [_to_domain(row) for row in result.scalars()]
-
-    async def executing_robot_ids(self) -> set[str]:
-        rows = await self._session.execute(
-            select(MissionRow.robot_id)
-            .where(MissionRow.update_id == 0)
-            .where(MissionRow.status.in_(_EXECUTING_STATUSES))
-            .where(MissionRow.robot_id.is_not(None))
-            .distinct()
-        )
-        return {r for (r,) in rows.all()}
-
-    async def list_executing_by_robot(self, robot_id: str) -> list[Mission]:
-        stmt = (
-            select(MissionRow)
-            .where(MissionRow.robot_id == robot_id)
-            .where(MissionRow.status.in_(_EXECUTING_STATUSES))
-            .order_by(MissionRow.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        return [_to_domain(row) for row in result.scalars()]
-
-    async def list_active(self) -> list[Mission]:
-        stmt = (
-            select(MissionRow)
-            .where(MissionRow.status.notin_(_TERMINAL_STATUSES))
-            .order_by(MissionRow.created_at.desc())
-        )
-        result = await self._session.execute(stmt)
-        return [_to_domain(row) for row in result.scalars()]
-
-    async def get_status(self, mission_id: UUID) -> MissionStatus:
-        stmt = select(MissionRow.status).where(
-            MissionRow.mission_id == mission_id,
-            MissionRow.update_id == 0,
-        )
-        status_str = (await self._session.execute(stmt)).scalar_one_or_none()
-        if status_str is None:
-            raise MissionNotFoundError(mission_id)
-        return MissionStatus(status_str)
-
-    async def update_status(
+    async def list(
         self,
-        mission_id: UUID,
-        new_status: MissionStatus,
         *,
-        errors: list[MissionError] | None = None,
-    ) -> Mission | None:
-        stmt = (
-            update(MissionRow)
-            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
-            .where(MissionRow.status.notin_(_TERMINAL_STATUSES))
-            .values(status=new_status.value, updated_at=datetime.now(timezone.utc))
-        )
-        # Persist the failure cause in the same UPDATE as the status so the two cannot diverge.
-        if errors is not None:
-            stmt = stmt.values(failure_errors=[e.model_dump(mode="json") for e in errors])
-        stmt = stmt.returning(MissionRow).execution_options(populate_existing=True)
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
-        if row is not None and is_terminal(new_status):
-            # A terminal mission no longer blocks site deletion; drop its refs so
-            # the FK does not pin sites referenced only by finished missions.
-            await self._session.execute(
-                delete(MissionSiteRefRow).where(MissionSiteRefRow.mission_id == mission_id)
-            )
-        return _to_domain(row) if row else None
+        robot_id: str | None = None,
+        name: str | None = None,
+        include_archived: bool = False,
+    ) -> list[Mission]:
+        stmt = select(MissionRow).order_by(MissionRow.created_at.desc())
+        if not include_archived:
+            stmt = stmt.where(MissionRow.archived_at.is_(None))
+        if robot_id is not None:
+            stmt = stmt.where(MissionRow.assigned_robot_id == robot_id)
+        if name is not None:
+            stmt = stmt.where(func.lower(MissionRow.name) == name.lower())
+        rows = (await self._session.execute(stmt)).scalars().all()
+        stages = await self._stages_for([row.mission_id for row in rows])
+        return [_to_domain(row, stages.get(row.mission_id, [])) for row in rows]
 
-    async def set_robot(self, mission_id: UUID, robot_id: str | None) -> None:
-        stmt = (
-            update(MissionRow)
-            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
-            .values(robot_id=robot_id, updated_at=datetime.now(timezone.utc))
-        )
-        await self._session.execute(stmt)
-
-    async def assign_robot(
-        self,
-        mission_id: UUID,
-        robot_id: str,
-        dispatched_at: datetime,
-    ) -> None:
-        stmt = (
-            update(MissionRow)
-            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
-            .values(
-                robot_id=robot_id,
-                dispatched_at=dispatched_at,
-                updated_at=dispatched_at,
+    async def replace_stages(self, mission_id: UUID, stages: list[Stage]) -> None:
+        values = _flatten(mission_id, stages)
+        keep = {v["stage_id"] for v in values}
+        # Dropped stages go first so a kept stage can take a dropped one's sequence; the
+        # deferred uniqueness lets kept stages swap sequences within the same statement.
+        await self._session.execute(
+            delete(MissionStageRow).where(
+                MissionStageRow.mission_id == mission_id,
+                MissionStageRow.stage_id.notin_(keep),
             )
         )
-        await self._session.execute(stmt)
+        if not values:
+            return
+        stmt = pg_insert(MissionStageRow).values(values)
+        set_ = {
+            column.name: stmt.excluded[column.name]
+            for column in MissionStageRow.__table__.columns
+            if not column.primary_key
+        }
+        await self._session.execute(
+            stmt.on_conflict_do_update(index_elements=[MissionStageRow.stage_id], set_=set_)
+        )
 
-    async def reset_to_draft(self, mission_id: UUID) -> Mission | None:
-        _RESETTABLE = (MissionStatus.FAILED.value, MissionStatus.CANCELLED.value)
+    async def get_stages(self, mission_id: UUID) -> list[Stage]:
+        return (await self._stages_for([mission_id])).get(mission_id, [])
+
+    async def _stages_for(self, mission_ids: list[UUID]) -> dict[UUID, list[Stage]]:
+        if not mission_ids:
+            return {}
+        stmt = (
+            select(MissionStageRow)
+            .where(MissionStageRow.mission_id.in_(mission_ids))
+            .order_by(MissionStageRow.mission_id, MissionStageRow.sequence)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        by_mission: dict[UUID, list[MissionStageRow]] = defaultdict(list)
+        for row in rows:
+            by_mission[row.mission_id].append(row)
+        return {mid: _nest(mission_rows) for mid, mission_rows in by_mission.items()}
+
+    async def set_assigned_robot(self, mission_id: UUID, robot_id: str | None) -> None:
+        await self._session.execute(
+            update(MissionRow)
+            .where(MissionRow.mission_id == mission_id)
+            .values(assigned_robot_id=robot_id, updated_at=datetime.now(timezone.utc))
+        )
+
+    async def archive(self, mission_id: UUID) -> Mission | None:
+        return await self._set_archived(mission_id, datetime.now(timezone.utc))
+
+    async def restore(self, mission_id: UUID) -> Mission | None:
+        return await self._set_archived(mission_id, None)
+
+    async def _set_archived(self, mission_id: UUID, when: datetime | None) -> Mission | None:
         stmt = (
             update(MissionRow)
-            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
-            .where(MissionRow.status.in_(_RESETTABLE))
-            .values(
-                status=MissionStatus.DRAFT.value,
-                robot_id=None,
-                dispatched_at=None,
-                failure_errors=None,
-                updated_at=datetime.now(timezone.utc),
-            )
+            .where(MissionRow.mission_id == mission_id)
+            .values(archived_at=when, updated_at=datetime.now(timezone.utc))
             .returning(MissionRow)
             .execution_options(populate_existing=True)
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
-        if row is not None:
-            # Reset starts a fresh run, so drop the prior run's resolved per-stage rows and
-            # rebuild the site refs that were pruned when the mission went terminal.
-            await self._session.execute(
-                delete(MissionStageStateRow).where(MissionStageStateRow.mission_id == mission_id)
-            )
-            await self._sync_site_refs(mission_id, _to_domain(row).stages)
-        return _to_domain(row) if row else None
+        if row is None:
+            return None
+        return _to_domain(row, await self.get_stages(mission_id))
 
-    async def _sync_site_refs(self, mission_id: UUID, stages: list[Stage]) -> None:
-        """Replace the mission's site refs with those referenced by ``stages``."""
-        await self._session.execute(
-            delete(MissionSiteRefRow).where(MissionSiteRefRow.mission_id == mission_id)
-        )
-        site_ids = referenced_site_ids(stages)
-        if site_ids:
-            await self._session.execute(
-                pg_insert(MissionSiteRefRow).values(
-                    [{"mission_id": mission_id, "site_id": sid} for sid in site_ids]
-                )
-            )
+    async def get_for_update(self, mission_id: UUID) -> Mission | None:
+        stmt = select(MissionRow).where(MissionRow.mission_id == mission_id).with_for_update()
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        if row is None:
+            return None
+        return _to_domain(row, await self.get_stages(mission_id))
 
-    async def get_assigned_robot(self, mission_id: UUID) -> str | None:
-        stmt = select(MissionRow.robot_id).where(
-            MissionRow.mission_id == mission_id,
-            MissionRow.update_id == 0,
-        )
+    async def mission_id_for_stage(self, stage_id: UUID) -> UUID | None:
+        stmt = select(MissionStageRow.mission_id).where(MissionStageRow.stage_id == stage_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def save_coverage_provenance(
-        self,
-        mission_id: UUID,
-        provenance: CoverageProvenance,
-    ) -> None:
-        await self._session.execute(
-            update(MissionRow)
-            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
-            .values(coverage=provenance.model_dump(mode="json"))
-        )
-
-    async def upsert_stage_states(
-        self,
-        mission_id: UUID,
-        records: list[StageStateRecord],
-    ) -> None:
-        if records:
-            await self._write_stage_rows(mission_id, records, versioned=True)
-
-    async def overwrite_stage_states(
-        self,
-        mission_id: UUID,
-        records: list[StageStateRecord],
-    ) -> None:
-        if records:
-            await self._write_stage_rows(mission_id, records, versioned=False)
-
-    async def _write_stage_rows(
-        self,
-        mission_id: UUID,
-        records: list[StageStateRecord],
-        *,
-        versioned: bool,
-    ) -> None:
-        """Upsert the given stage rows, keyed ``(mission_id, stage_id)``.
-
-        When ``versioned``, a row advances only on a strictly higher ``header_id``; otherwise
-        the write is unconditional. Both assume the caller holds the mission row lock.
-        """
-        now = datetime.now(timezone.utc)
-        values = [
-            {
-                "mission_id": mission_id,
-                "stage_id": record.stage_id,
-                "header_id": record.header_id,
-                "stage_index": record.stage_index,
-                "status": record.status.value,
-                "progress": record.progress,
-                "started_at": record.started_at,
-                "ended_at": record.ended_at,
-                "result": record.result,
-                "updated_at": now,
-                "source_ts": record.source_ts,
-            }
-            for record in records
-        ]
-        stmt = pg_insert(MissionStageStateRow).values(values)
-        set_ = {
-            column.name: stmt.excluded[column.name]
-            for column in MissionStageStateRow.__table__.columns
-            if not column.primary_key
-        }
-        index = [MissionStageStateRow.mission_id, MissionStageStateRow.stage_id]
-        if versioned:
-            # The header_id guard applies to the conflict UPDATE only; a first insert lands.
-            stmt = stmt.on_conflict_do_update(
-                index_elements=index,
-                set_=set_,
-                where=MissionStageStateRow.header_id < stmt.excluded.header_id,
-            )
-        else:
-            stmt = stmt.on_conflict_do_update(index_elements=index, set_=set_)
-        await self._session.execute(stmt)
-
-    async def get_stage_states(self, mission_id: UUID) -> list[StageStateRecord]:
+    async def missions_referencing_site(self, site_id: UUID) -> list[UUID]:
         stmt = (
-            select(MissionStageStateRow)
-            .where(MissionStageStateRow.mission_id == mission_id)
-            .order_by(MissionStageStateRow.stage_index)
+            select(MissionStageRow.mission_id).where(MissionStageRow.site_id == site_id).distinct()
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
-        return [StageStateRecord.model_validate(row, from_attributes=True) for row in rows]
+        return [mid for (mid,) in (await self._session.execute(stmt)).all()]
 
     async def delete(self, mission_id: UUID) -> None:
-        await self._session.execute(
-            delete(MissionStageStateRow).where(MissionStageStateRow.mission_id == mission_id)
-        )
-        await self._session.execute(
-            delete(MissionSiteRefRow).where(MissionSiteRefRow.mission_id == mission_id)
-        )
+        # Stages cascade from the definition.
         await self._session.execute(delete(MissionRow).where(MissionRow.mission_id == mission_id))
 
-    async def get_record(self, mission_id: UUID) -> MissionRecord | None:
-        row = await self._session.get(MissionRow, (mission_id, 0))
-        return _to_record(row) if row else None
 
-    async def get_record_for_update(self, mission_id: UUID) -> MissionRecord | None:
-        stmt = (
-            select(MissionRow)
-            .where(MissionRow.mission_id == mission_id, MissionRow.update_id == 0)
-            .with_for_update()
+def _site_of(stage: Stage) -> UUID | None:
+    """The one site a site-local stage is driven in; None for a WGS84 stage.
+
+    The application refuses a stage spanning sites before it is saved, so the first site-local
+    waypoint's site is the stage's site.
+    """
+    for waypoint in stage_waypoints(stage):
+        if isinstance(waypoint, SiteLocalWaypoint):
+            return waypoint.site_id
+    return None
+
+
+def _flatten(
+    mission_id: UUID, stages: list[Stage], parent_stage_id: UUID | None = None
+) -> list[dict]:
+    """One row per stage at every depth; a cleanup stage points at its parent."""
+    rows: list[dict] = []
+    for sequence, stage in enumerate(stages):
+        rows.append(
+            {
+                "stage_id": stage.stage_id,
+                "mission_id": mission_id,
+                "sequence": sequence,
+                "kind": stage.kind,
+                "site_id": _site_of(stage),
+                "parent_stage_id": parent_stage_id,
+                "spec": stage.model_dump(mode="json", exclude={"stage_id", "on_cancel"}),
+            }
         )
-        row = (await self._session.execute(stmt)).scalar_one_or_none()
-        return _to_record(row) if row else None
-
-    async def list_records(
-        self, *, robot_id: str | None = None, name: str | None = None
-    ) -> list[MissionRecord]:
-        stmt = (
-            select(MissionRow)
-            .where(MissionRow.update_id == 0)
-            .order_by(MissionRow.created_at.desc())
-        )
-        if robot_id is not None:
-            stmt = stmt.where(MissionRow.robot_id == robot_id)
-        if name is not None:
-            stmt = stmt.where(func.lower(MissionRow.name) == name.lower())
-        result = await self._session.execute(stmt)
-        return [_to_record(row) for row in result.scalars()]
+        if stage.on_cancel:
+            rows.extend(_flatten(mission_id, stage.on_cancel, stage.stage_id))
+    return rows
 
 
-def _to_domain(row: MissionRow) -> Mission:
+def _nest(rows: list[MissionStageRow]) -> list[Stage]:
+    """Rebuild the nested domain shape from flat rows ordered by sequence."""
+    children: dict[UUID | None, list[MissionStageRow]] = defaultdict(list)
+    for row in rows:
+        children[row.parent_stage_id].append(row)
+
+    def build(parent: UUID | None) -> list[Stage]:
+        return [
+            _STAGE.validate_python(
+                {
+                    **row.spec,
+                    "stage_id": row.stage_id,
+                    "on_cancel": build(row.stage_id) or None,
+                }
+            )
+            for row in sorted(children[parent], key=lambda r: r.sequence)
+        ]
+
+    return build(None)
+
+
+def _to_domain(row: MissionRow, stages: list[Stage]) -> Mission:
     return Mission(
         mission_id=row.mission_id,
-        update_id=row.update_id,
         name=row.name,
         description=row.description,
-        stages=[_STAGE.validate_python(s) for s in row.stages],
+        stages=stages,
+        assigned_robot_id=row.assigned_robot_id,
+        archived_at=row.archived_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
-    )
-
-
-def _to_record(row: MissionRow) -> MissionRecord:
-    return MissionRecord(
-        mission=_to_domain(row),
-        status=MissionStatus(row.status),
-        robot_id=row.robot_id,
-        dispatched_at=row.dispatched_at,
-        failure_errors=(
-            [MissionError.model_validate(e) for e in row.failure_errors]
-            if row.failure_errors
-            else None
-        ),
-        coverage=(CoverageProvenance.model_validate(row.coverage) if row.coverage else None),
     )

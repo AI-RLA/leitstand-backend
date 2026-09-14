@@ -4,7 +4,7 @@ caught by routers and translated to HTTP status codes."""
 from enum import Enum
 from uuid import UUID
 
-from leitstand_backend.domain.model.mission.mission import MissionStatus
+from leitstand_backend.domain.model.mission.run_status import RunStatus
 
 
 class DomainError(Exception):
@@ -71,10 +71,14 @@ class SiteNotFoundError(DomainError):
 
 
 class SiteInUse(DomainError):
-    """Site cannot be deleted because non-terminal missions still reference it."""
+    """Site cannot be deleted because missions, archived ones included, still reference it.
+
+    The site's anchor is what gives every site-local position in those missions' history its
+    meaning, so a site stays as long as any mission that used it.
+    """
 
     def __init__(self, site_id: UUID, blocking_mission_ids: list[UUID] | None = None):
-        super().__init__(f"site {site_id} is referenced by non-terminal missions")
+        super().__init__(f"site {site_id} is referenced by missions")
         self.site_id = site_id
         self.blocking_mission_ids = blocking_mission_ids or []
 
@@ -163,17 +167,6 @@ class ImplementNarrowerThanRobot(DomainError):
         self.operation_width_m = operation_width_m
 
 
-class GeneratedPlanNotEditable(DomainError):
-    """Stages of a mission a planner produced cannot be replaced by hand."""
-
-    def __init__(self, mission_id: UUID):
-        super().__init__(
-            f"mission {mission_id} was planned rather than typed; re-plan it instead of "
-            "replacing its stages"
-        )
-        self.mission_id = mission_id
-
-
 class StaleCoverageBoundary(DomainError):
     """Field a coverage plan was derived from no longer matches what the plan was made against."""
 
@@ -208,23 +201,102 @@ class RobotFactsheetMissing(DomainError):
 
 
 class InvalidMissionTransition(DomainError):
-    """The (state, trigger) pair is not in the allowed-transitions table."""
+    """The (state, trigger) pair is not in the run's allowed-transitions table."""
 
-    def __init__(self, current: MissionStatus, trigger: str | Enum):
+    def __init__(self, current: RunStatus, trigger: str | Enum):
         # This message reaches an audit record, and an enum member's repr would carry its class
         # and value there.
         name = trigger.value if isinstance(trigger, Enum) else trigger
-        super().__init__(f"cannot apply {name!r} to mission in state {current}")
+        super().__init__(f"cannot apply {name!r} to run in state {current.value}")
         self.current = current
         self.trigger = trigger
+
+
+class MissionRunInProgress(DomainError):
+    """A run of this mission is already active and the dispatch did not ask to run alongside it."""
+
+    def __init__(self, mission_id: UUID, active_run_ids: list[UUID]):
+        super().__init__(
+            f"mission {mission_id} already has an active run; wait for it to end or cancel it"
+        )
+        self.mission_id = mission_id
+        self.active_run_ids = active_run_ids
+
+
+class AmbiguousRun(DomainError):
+    """More than one run of this mission is active and the request did not say which."""
+
+    def __init__(self, mission_id: UUID, active_run_ids: list[UUID]):
+        super().__init__(
+            f"mission {mission_id} has {len(active_run_ids)} active runs; pass run_id to choose one"
+        )
+        self.mission_id = mission_id
+        self.active_run_ids = active_run_ids
+
+
+class RunNotFoundError(DomainError):
+    def __init__(self, run_id: UUID, *, mission_has_none: bool = False):
+        if mission_has_none:
+            super().__init__(f"mission {run_id} has no run to act on")
+        else:
+            super().__init__(f"run {run_id} not found")
+        self.run_id = run_id
+
+
+class MissionArchived(DomainError):
+    """The mission is archived: it can be read, but not changed until restored."""
+
+    def __init__(self, mission_id: UUID):
+        super().__init__(f"mission {mission_id} is archived")
+        self.mission_id = mission_id
+
+
+class MissionNotArchived(DomainError):
+    def __init__(self, mission_id: UUID):
+        super().__init__(f"mission {mission_id} is not archived")
+        self.mission_id = mission_id
+
+
+class DuplicateStageId(DomainError):
+    """One request names the same stage_id twice."""
+
+    def __init__(self, stage_id: UUID):
+        super().__init__(f"stage {stage_id} appears more than once in the request")
+        self.stage_id = stage_id
+
+
+class StageNotInMission(DomainError):
+    """A supplied stage_id does not belong to the mission being edited, so cannot be kept."""
+
+    def __init__(self, mission_id: UUID | None, stage_id: UUID):
+        target = f"mission {mission_id}" if mission_id is not None else "a new mission"
+        super().__init__(
+            f"stage {stage_id} is not a stage of {target}; omit stage_id for a new stage"
+        )
+        self.mission_id = mission_id
+        self.stage_id = stage_id
+
+
+class StageSpansSites(DomainError):
+    """Waypoints within one site-local stage name more than one site.
+
+    A stage is driven in one map frame; crossing into another site's frame is a stage boundary.
+    """
+
+    def __init__(self, stage_index: int, site_ids: set[UUID]):
+        super().__init__(
+            f"stage at index {stage_index} spans {len(site_ids)} sites; a stage uses one site"
+        )
+        self.stage_index = stage_index
+        self.site_ids = site_ids
 
 
 class MissionRejectedByRobot(DomainError):
     """Robot's dispatch reply set ``accepted=False``."""
 
-    def __init__(self, mission_id: UUID, robot_id: str, reason: str | None):
-        super().__init__(f"robot {robot_id!r} rejected mission {mission_id}: {reason}")
-        self.mission_id = mission_id
+    def __init__(self, run_id: UUID, robot_id: str, reason: str | None):
+        super().__init__(f"robot {robot_id!r} rejected run {run_id}: {reason}")
+        self.run_id = run_id
         self.robot_id = robot_id
         self.reason = reason
 
@@ -242,7 +314,17 @@ class NoRobotAssigned(DomainError):
 class MissionDispatchTimeout(DomainError):
     """Robot did not reply to the dispatch queryable within the timeout."""
 
-    def __init__(self, mission_id: UUID, robot_id: str):
-        super().__init__(f"robot {robot_id!r} did not acknowledge mission {mission_id}")
-        self.mission_id = mission_id
+    def __init__(self, run_id: UUID, robot_id: str):
+        super().__init__(f"robot {robot_id!r} did not acknowledge run {run_id}")
+        self.run_id = run_id
         self.robot_id = robot_id
+
+
+class MissionDispatchFailed(DomainError):
+    """The dispatch could not be delivered, so the robot never had a chance to answer."""
+
+    def __init__(self, run_id: UUID, robot_id: str, reason: str):
+        super().__init__(f"could not send run {run_id} to robot {robot_id!r}: {reason}")
+        self.run_id = run_id
+        self.robot_id = robot_id
+        self.reason = reason

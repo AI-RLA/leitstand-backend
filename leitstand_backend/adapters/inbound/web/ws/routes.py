@@ -19,6 +19,7 @@ from leitstand_backend.adapters.inbound.web.ws.frames import (
     UnsubscribeFrame,
 )
 from leitstand_backend.infrastructure.auth import (
+    bearer_token,
     selected_subprotocol,
     token_accepted,
     ws_credential,
@@ -35,9 +36,12 @@ _PONG_TIMEOUT_S = 10.0
 @router.websocket("/ws/v1")
 async def ws_endpoint(ws: WebSocket) -> None:
     offered = ws.scope.get("subprotocols") or []
-    if not token_accepted(ws.app.state.settings, ws_credential(offered)):
+    # The proxy in front of a browser sends the header; a direct client sends the subprotocol.
+    credential = bearer_token(ws.headers.get("authorization")) or ws_credential(offered)
+    if not token_accepted(ws.app.state.settings, credential):
         # Closing before accept rejects the handshake itself, so an unauthenticated client never
         # reaches the bus. This stream carries the whole fleet's live state.
+        logger.warning("ws_rejected", client=ws.client.host if ws.client else None)
         await ws.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     await ws.accept(subprotocol=selected_subprotocol(offered))

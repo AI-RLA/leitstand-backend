@@ -87,18 +87,18 @@ def mission_state_from_proto(state: mission_state_pb2.MissionState) -> MissionSt
     them. Pydantic re-validates bounds on construction.
     """
     if not state.HasField("timestamp"):
-        raise ValueError(f"mission state frame for {state.mission_id} is missing its timestamp")
+        raise ValueError(f"mission state frame for run {state.run_id} is missing its timestamp")
 
     exec_status = _MISSION_EXEC_STATUS_FROM_PROTO.get(state.exec_status)
     if exec_status is None:
-        raise ValueError(f"unmapped exec status {state.exec_status} for mission {state.mission_id}")
+        raise ValueError(f"unmapped exec status {state.exec_status} for run {state.run_id}")
 
     stage_states = [_stage_state_from_proto(s) for s in state.stage_states]
     if len({s.stage_id for s in stage_states}) != len(stage_states):
-        raise ValueError(f"duplicate stage id in mission state frame for {state.mission_id}")
+        raise ValueError(f"duplicate stage id in mission state frame for run {state.run_id}")
 
     return MissionStateMessage(
-        mission_id=UUID(state.mission_id),
+        run_id=UUID(state.run_id),
         header_id=state.header_id,
         timestamp=_utc(state.timestamp),
         exec_status=exec_status,
