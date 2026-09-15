@@ -8,6 +8,7 @@ from uuid import UUID
 
 from leitstand_backend.application.mission_events import emit_run_lifecycle
 from leitstand_backend.application.run_state_view import settle_stage_state
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.domain.model.mission.mission_state import (
     ErrorOrigin,
     ErrorSeverity,
@@ -103,4 +104,25 @@ async def reconcile_robot_runs(
             len(ended),
             ", ".join(str(rid) for rid in ended),
         )
+    if claim_reported and claimed_run_id is not None:
+        await _stop_a_closed_claim(runs, dispatcher, robot_id, claimed_run_id)
     return ended
+
+
+async def _stop_a_closed_claim(
+    runs: MissionRunRepository, dispatcher: MissionDispatcher, robot_id: str, claimed: str
+) -> None:
+    """Tell a robot to drop a run the backend has already ended, closed while it was away."""
+    try:
+        run = await runs.get(UUID(claimed))
+    except ValueError:
+        return
+    if run is None or not is_terminal(run.status) or run.robot_id != robot_id:
+        return
+    logger.warning(
+        "robot %s reconnected still holding run %s, which ended as %s; cancel sent",
+        robot_id,
+        run.run_id,
+        run.status.value,
+    )
+    await dispatcher.cancel(run.run_id, robot_id, CancelMode.IMMEDIATE)

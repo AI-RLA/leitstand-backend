@@ -13,6 +13,7 @@ from geojson_pydantic import Polygon
 
 from leitstand_backend.application.mission_management_service import MissionManagementService
 from leitstand_backend.domain.errors import (
+    CoveragePlannerUnavailable,
     DuplicateStageId,
     ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
@@ -43,7 +44,7 @@ from leitstand_backend.domain.model.robot.robot_factsheet import (
 )
 from leitstand_backend.ports.inbound.mission_management import (
     AssignMissionCommand,
-    CoverageStageRef,
+    CoverageStageInput,
     CreateGeneratedMissionCommand,
     CreateMissionCommand,
     DeleteMissionCommand,
@@ -52,6 +53,7 @@ from leitstand_backend.ports.inbound.mission_management import (
     UnassignMissionCommand,
     UpdateMissionCommand,
 )
+from tests.fakes.coverage_stage_planning import bind_stage_planning
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_field_repository import InMemoryFieldRepository
 from tests.fakes.in_memory_mission_repository import InMemoryMissionRepository
@@ -159,6 +161,7 @@ def _make_svc():
             }
         )
 
+    plan, unchanged, planner = bind_stage_planning(fields, factsheets)
     svc = MissionManagementService(
         repo=repo,
         runs=runs,
@@ -167,7 +170,10 @@ def _make_svc():
         audit=audit,
         sites=sites,
         fields=fields,
+        planner=plan,
+        unchanged=unchanged,
     )
+    svc.fake_planner = planner  # type: ignore[attr-defined]
     return svc, repo, runs, factsheets, events, audit_calls, fields
 
 
@@ -685,7 +691,7 @@ async def test_a_planned_mission_can_gain_a_stage_while_its_planned_one_is_carri
         UpdateMissionCommand(
             mission_id=mission.mission_id,
             stages=[
-                CoverageStageRef(stage_id=planned.stage_id),
+                CoverageStageInput(stage_id=planned.stage_id),
                 NavigationStageInput(waypoints=[WGS84Waypoint(lat=52.0, lon=8.0)]),
             ],
         )
@@ -722,7 +728,7 @@ async def test_naming_a_coverage_stage_of_another_mission_is_refused():
         await svc.update(
             UpdateMissionCommand(
                 mission_id=mission.mission_id,
-                stages=[CoverageStageRef(stage_id=uuid4())],
+                stages=[CoverageStageInput(stage_id=uuid4())],
             )
         )
 
@@ -777,3 +783,391 @@ async def test_a_site_named_only_in_the_path_is_still_checked():
                 ],
             )
         )
+
+
+# --- coverage stages authored through create and update ---------------------------------------
+
+
+def _coverage_input(field_id: UUID, **overrides) -> CoverageStageInput:
+    values = dict(
+        field_id=field_id, operation_width_m=3.0, params_robot_id=ROBOT_ID, allow_overlap=False
+    )
+    values.update(overrides)
+    return CoverageStageInput(**values)
+
+
+async def _authored_coverage(svc, fields, factsheets, **overrides):
+    """A mission created from a navigation input and a coverage input, planned by the fake."""
+    factsheets.set(_coverage_factsheet(1.5))
+    field = seeded_field(fields)
+    mission = await svc.create(
+        CreateMissionCommand(
+            name="both",
+            stages=[_wgs84_stage(), _coverage_input(field.id, **overrides)],
+        )
+    )
+    return mission, field
+
+
+@pytest.mark.asyncio
+async def test_create_plans_a_coverage_input_beside_a_navigation_stage():
+    svc, _, _, factsheets, _, audit_calls, fields = _make_svc()
+
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+
+    assert [stage.kind for stage in mission.stages] == ["navigation", "coverage"]
+    planned = mission.stages[1]
+    assert isinstance(planned, CoverageStage)
+    assert planned.provenance.field_id == field.id
+    assert planned.provenance.planned_for_robot_id == ROBOT_ID
+    assert planned.provenance.params.turning_radius_m == 1.5
+    assert planned.provenance.param_sources == {
+        "turning_radius_m": f"factsheet:{ROBOT_ID}",
+        "track_width_m": f"factsheet:{ROBOT_ID}",
+        "headland_width_m": "turning_radius",
+        "swath_angle_deg": "planner",
+    }
+    assert len(svc.fake_planner.calls) == 1
+    audited = [call for call in audit_calls if call["action"] == "mission.plan_stage"]
+    assert len(audited) == 1
+    assert audited[0]["payload"]["stage_ids"] == [str(planned.stage_id)]
+    assert audited[0]["payload"]["old_digest"] is None
+    assert audited[0]["payload"]["new_digest"] == stages_digest(mission.stages)
+
+
+@pytest.mark.asyncio
+async def test_saving_identical_inputs_again_plans_nothing():
+    """The editor sends the inputs it loaded; a save that changed nothing must cost nothing."""
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    stage = mission.stages[1]
+
+    updated = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[
+                NavigationStageInput(
+                    stage_id=mission.stages[0].stage_id,
+                    waypoints=[WGS84Waypoint(lat=52.3, lon=8.05)],
+                ),
+                _coverage_input(field.id, stage_id=stage.stage_id),
+            ],
+        )
+    )
+
+    assert updated.stages[1] == stage
+    assert len(svc.fake_planner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_direction_the_planner_chose_is_kept_until_the_operator_sets_one():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    stage = mission.stages[1]
+    assert stage.provenance.params.swath_angle_deg == 42.5
+
+    kept = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[_coverage_input(field.id, stage_id=stage.stage_id)],
+        )
+    )
+    assert kept.stages[0] == stage
+    assert len(svc.fake_planner.calls) == 1
+
+    replanned = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[_coverage_input(field.id, stage_id=stage.stage_id, swath_angle_deg=42.5)],
+        )
+    )
+    assert replanned.stages[0].provenance.param_sources["swath_angle_deg"] == "manual"
+    assert len(svc.fake_planner.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_changed_width_replans_under_the_same_stage_id_and_is_audited():
+    svc, _, _, factsheets, _, audit_calls, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    stage = mission.stages[1]
+
+    updated = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[_coverage_input(field.id, stage_id=stage.stage_id, operation_width_m=4.0)],
+        )
+    )
+
+    replanned = updated.stages[0]
+    assert replanned.stage_id == stage.stage_id
+    assert replanned.provenance.params.operation_width_m == 4.0
+    assert len(svc.fake_planner.calls) == 2
+    audited = [call for call in audit_calls if call["action"] == "mission.plan_stage"]
+    assert audited[-1]["payload"]["stage_ids"] == [str(stage.stage_id)]
+    assert audited[-1]["payload"]["old_digest"] == stages_digest(mission.stages)
+    assert audited[-1]["payload"]["new_digest"] == stages_digest(updated.stages)
+
+
+@pytest.mark.asyncio
+async def test_a_carried_coverage_stage_is_untouched():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, _ = await _authored_coverage(svc, fields, factsheets)
+    stage = mission.stages[1]
+
+    updated = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[CoverageStageInput(stage_id=stage.stage_id)],
+        )
+    )
+
+    assert updated.stages == [stage]
+    assert len(svc.fake_planner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_coverage_input_naming_a_stage_of_another_mission_is_refused():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+
+    with pytest.raises(StageNotInMission):
+        await svc.update(
+            UpdateMissionCommand(
+                mission_id=mission.mission_id,
+                stages=[_coverage_input(field.id, stage_id=uuid4())],
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_planner_failure_leaves_the_mission_untouched():
+    svc, repo, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    svc.fake_planner.error = CoveragePlannerUnavailable("planner down")
+
+    with pytest.raises(CoveragePlannerUnavailable):
+        await svc.update(
+            UpdateMissionCommand(
+                mission_id=mission.mission_id,
+                stages=[
+                    _coverage_input(
+                        field.id, stage_id=mission.stages[1].stage_id, operation_width_m=5.0
+                    )
+                ],
+            )
+        )
+
+    assert (await repo.get(mission.mission_id)).stages == mission.stages
+
+
+@pytest.mark.asyncio
+async def test_two_coverage_inputs_on_one_mission_are_both_planned():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    factsheets.set(_coverage_factsheet(1.5))
+    field = seeded_field(fields)
+
+    mission = await svc.create(
+        CreateMissionCommand(
+            name="twice",
+            stages=[_coverage_input(field.id), _coverage_input(field.id, operation_width_m=2.0)],
+        )
+    )
+
+    assert [stage.kind for stage in mission.stages] == ["coverage", "coverage"]
+    assert mission.stages[0].stage_id != mission.stages[1].stage_id
+    assert len(svc.fake_planner.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_coverage_input_keeps_its_cleanup_child():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    factsheets.set(_coverage_factsheet(1.5))
+    field = seeded_field(fields)
+
+    mission = await svc.create(
+        CreateMissionCommand(
+            name="with cleanup",
+            stages=[_coverage_input(field.id, on_cancel=[_wgs84_stage()])],
+        )
+    )
+
+    stage = mission.stages[0]
+    assert isinstance(stage, CoverageStage)
+    assert stage.on_cancel is not None and stage.on_cancel[0].kind == "navigation"
+
+
+@pytest.mark.asyncio
+async def test_a_stage_planned_before_sources_were_recorded_is_replanned_when_edited():
+    """Only a carried stage is kept as it is; inputs given in full re-plan an old stage once."""
+    svc, repo, _, factsheets, _, _, fields = _make_svc()
+    factsheets.set(_coverage_factsheet(1.5))
+    mission = await _seeded_coverage(svc, repo, fields, radius_planned_for=1.5)
+    old = mission.stages[0]
+    assert old.provenance.param_sources is None
+
+    updated = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[_coverage_input(old.provenance.field_id, stage_id=old.stage_id)],
+        )
+    )
+
+    assert updated.stages[0].stage_id == old.stage_id
+    assert updated.stages[0].provenance.param_sources is not None
+    assert len(svc.fake_planner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_carried_coverage_stage_keeps_its_cleanup_children():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    factsheets.set(_coverage_factsheet(1.5))
+    field = seeded_field(fields)
+    mission = await svc.create(
+        CreateMissionCommand(
+            name="with cleanup",
+            stages=[_coverage_input(field.id, on_cancel=[_wgs84_stage()])],
+        )
+    )
+    stage = mission.stages[0]
+
+    updated = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[CoverageStageInput(stage_id=stage.stage_id)],
+        )
+    )
+
+    assert updated.stages == [stage]
+    assert updated.stages[0].on_cancel == stage.on_cancel
+
+
+@pytest.mark.asyncio
+async def test_a_stage_id_named_twice_is_refused_before_any_planning():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    stage_id = mission.stages[1].stage_id
+    svc.fake_planner.calls.clear()
+
+    with pytest.raises(DuplicateStageId):
+        await svc.update(
+            UpdateMissionCommand(
+                mission_id=mission.mission_id,
+                stages=[
+                    _coverage_input(field.id, stage_id=stage_id, operation_width_m=4.0),
+                    _coverage_input(field.id, stage_id=stage_id, operation_width_m=5.0),
+                ],
+            )
+        )
+
+    assert svc.fake_planner.calls == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"operation_width_m": 3.0},
+        {"params_robot_id": "scout"},
+        {"headland_width_m": 1.0},
+        {"swath_angle_deg": 10.0},
+        {"allow_overlap": True},
+    ],
+)
+def test_a_carried_coverage_stage_refuses_every_planning_input(extra):
+    with pytest.raises(ValueError):
+        CoverageStageInput(stage_id=uuid4(), **extra)
+
+
+@pytest.mark.asyncio
+async def test_a_carried_stage_named_twice_is_refused_before_any_planning():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    stage_id = mission.stages[1].stage_id
+    svc.fake_planner.calls.clear()
+
+    with pytest.raises(DuplicateStageId):
+        await svc.update(
+            UpdateMissionCommand(
+                mission_id=mission.mission_id,
+                stages=[
+                    CoverageStageInput(stage_id=stage_id),
+                    _coverage_input(field.id, stage_id=stage_id, operation_width_m=5.0),
+                ],
+            )
+        )
+
+    assert svc.fake_planner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_carried_stages_cleanup_child_cannot_be_named_again_elsewhere():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    factsheets.set(_coverage_factsheet(1.5))
+    field = seeded_field(fields)
+    mission = await svc.create(
+        CreateMissionCommand(
+            name="with cleanup",
+            stages=[_coverage_input(field.id, on_cancel=[_wgs84_stage()])],
+        )
+    )
+    stage = mission.stages[0]
+    child_id = stage.on_cancel[0].stage_id
+
+    with pytest.raises(DuplicateStageId):
+        await svc.update(
+            UpdateMissionCommand(
+                mission_id=mission.mission_id,
+                stages=[
+                    CoverageStageInput(stage_id=stage.stage_id),
+                    NavigationStageInput(
+                        stage_id=child_id, waypoints=[WGS84Waypoint(lat=52.0, lon=8.0)]
+                    ),
+                ],
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_empty_cleanup_list_on_a_carried_stage_clears_its_children():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    factsheets.set(_coverage_factsheet(1.5))
+    field = seeded_field(fields)
+    mission = await svc.create(
+        CreateMissionCommand(
+            name="with cleanup",
+            stages=[_coverage_input(field.id, on_cancel=[_wgs84_stage()])],
+        )
+    )
+    stage = mission.stages[0]
+
+    updated = await svc.update(
+        UpdateMissionCommand(
+            mission_id=mission.mission_id,
+            stages=[CoverageStageInput(stage_id=stage.stage_id, on_cancel=[])],
+        )
+    )
+
+    assert updated.stages[0].on_cancel is None
+    assert len(svc.fake_planner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_navigation_input_reusing_a_coverage_id_is_refused_before_planning():
+    svc, _, _, factsheets, _, _, fields = _make_svc()
+    mission, field = await _authored_coverage(svc, fields, factsheets)
+    stage_id = mission.stages[1].stage_id
+    svc.fake_planner.calls.clear()
+
+    with pytest.raises(DuplicateStageId):
+        await svc.update(
+            UpdateMissionCommand(
+                mission_id=mission.mission_id,
+                stages=[
+                    NavigationStageInput(
+                        stage_id=stage_id, waypoints=[WGS84Waypoint(lat=52.0, lon=8.0)]
+                    ),
+                    _coverage_input(field.id, stage_id=stage_id, operation_width_m=5.0),
+                ],
+            )
+        )
+
+    assert svc.fake_planner.calls == []

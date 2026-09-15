@@ -25,13 +25,14 @@ from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_mappers
     run_projection_from_proto,
     run_to_proto,
 )
-from leitstand_backend.domain.model.mission.mission import Mission, NavigationStage
+from leitstand_backend.domain.model.mission.mission import Mission, NavigationStage, Stage
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
+from tests.fakes.planned_coverage import coverage_provenance, coverage_stage
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _mission(*stages: NavigationStage) -> Mission:
+def _mission(*stages: Stage) -> Mission:
     return Mission(
         mission_id=uuid4(),
         name="contract-corpus",
@@ -79,6 +80,18 @@ def _examples() -> list[Mission]:
             WGS84Waypoint(lat=-90.0, lon=-180.0),
         ],
     )
+    # Planned by hand-entered values: no robot, and every source recorded.
+    manual_coverage = coverage_stage(
+        provenance=coverage_provenance(planned_for_robot_id=None).model_copy(
+            update={
+                "param_sources": {
+                    "turning_radius_m": "manual",
+                    "headland_width_m": "turning_radius",
+                    "swath_angle_deg": "planner",
+                }
+            }
+        )
+    )
     return [
         _mission(wgs84),
         _mission(headed),
@@ -88,7 +101,15 @@ def _examples() -> list[Mission]:
         _mission(wgs84, site_local),
         _mission(heading_bounds),
         _mission(extremes),
+        _mission(wgs84, manual_coverage),
     ]
+
+
+def _provenance_of(mission: Mission) -> dict:
+    """What the receiver side re-attaches: provenance never crosses the wire."""
+    return {
+        stage.stage_id: stage.provenance for stage in mission.stages if stage.kind == "coverage"
+    }
 
 
 @pytest.mark.parametrize("mission", _examples())
@@ -100,7 +121,9 @@ def test_pydantic_roundtrip(mission: Mission) -> None:
 @pytest.mark.parametrize("mission", _examples())
 def test_roundtrip_via_acl(mission: Mission) -> None:
     """domain -> proto -> domain (through the named-field ACL) is projection-lossless."""
-    mission_id, stages = run_projection_from_proto(run_to_proto(mission.mission_id, mission.stages))
+    mission_id, stages = run_projection_from_proto(
+        run_to_proto(mission.mission_id, mission.stages), _provenance_of(mission)
+    )
     assert mission_id == mission.mission_id
     assert stages == mission.stages
 
@@ -111,7 +134,10 @@ def test_proto_json_roundtrip(mission: Mission) -> None:
     proto = run_to_proto(mission.mission_id, mission.stages)
     wire = json_format.MessageToJson(proto, preserving_proto_field_name=True)
     parsed = json_format.Parse(wire, mission_pb2.Mission(), ignore_unknown_fields=False)
-    assert run_projection_from_proto(parsed) == (mission.mission_id, mission.stages)
+    assert run_projection_from_proto(parsed, _provenance_of(mission)) == (
+        mission.mission_id,
+        mission.stages,
+    )
 
 
 @pytest.mark.parametrize("mission", _examples())

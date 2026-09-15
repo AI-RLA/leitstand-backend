@@ -57,6 +57,13 @@ class CancelRunCommand(BaseModel):
     mode: CancelMode = CancelMode.GRACEFUL
 
 
+class CloseRunCommand(BaseModel):
+    """End a run whose robot is offline, on the operator's word rather than the robot's report."""
+
+    mission_id: UUID
+    run_id: UUID | None = None
+
+
 class PauseRunCommand(BaseModel):
     mission_id: UUID
     run_id: UUID | None = None
@@ -91,6 +98,10 @@ class RunManagementUseCase(ABC):
 
     @abstractmethod
     async def cancel(self, command: CancelRunCommand) -> MissionRun: ...
+
+    @abstractmethod
+    async def close(self, command: CloseRunCommand) -> MissionRun:
+        """Close a run whose robot is offline; refused while the robot can answer a cancel."""
 
     @abstractmethod
     async def pause(self, command: PauseRunCommand) -> MissionRun: ...

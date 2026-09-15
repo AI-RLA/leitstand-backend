@@ -17,6 +17,7 @@ from leitstand_backend.domain.errors import (
     CoveragePlannerUnavailable,
     CoveragePlanRejected,
     FieldNotFoundError,
+    FieldNotPlannable,
     ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     InvalidMissionTransition,
@@ -26,12 +27,15 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotOffline,
+    RobotOnline,
     RobotPhysicalParametersMissing,
     RobotRefusedControl,
     RobotUnreachable,
     RunNotFoundError,
     StageNotInMission,
     StaleCoverageBoundary,
+    TurningRadiusBelowRobot,
     UnknownSite,
     UnsupportedStageKind,
     UnsupportedWaypointFrame,
@@ -74,6 +78,7 @@ _CASES = [
 # dispatch alone can also refuse for these.
 _DISPATCH_ONLY_CASES = [
     (MissionRunInProgress(_MISSION_ID, [uuid4()]), 409),
+    (RobotOffline("scout"), 409),
     (NoRobotAssigned(_MISSION_ID), 422),
     # Freezing the run's site anchors is a dispatch-time read, so a site deleted since the
     # mission was written is reported here and nowhere else.
@@ -82,6 +87,7 @@ _DISPATCH_ONLY_CASES = [
 
 # cancel / pause / resume resolve a run first, and can fail on that.
 _STEER_CASES = [
+    (RobotOffline("scout"), 409),
     (MissionNotFoundError(_MISSION_ID), 404),
     (RunNotFoundError(uuid4()), 404),
     (AmbiguousRun(_MISSION_ID, [uuid4(), uuid4()]), 409),
@@ -114,6 +120,9 @@ def _app(error: Exception, *, on_dispatch: bool = False):
             raise error
 
         async def cancel(self, command):
+            raise error
+
+        async def close(self, command):
             raise error
 
     app.dependency_overrides[get_mission_repository] = lambda: InMemoryMissionRepository()
@@ -151,9 +160,78 @@ def test_cancel_maps_each_domain_error_to_its_status(error, status):
     assert resp.status_code == status
 
 
+@pytest.mark.parametrize(
+    "error,status",
+    _STEER_CASES + [(RobotOnline("scout"), 409)],
+    ids=lambda v: type(v).__name__,
+)
+def test_close_maps_each_domain_error_to_its_status(error, status):
+    with TestClient(_app(error)) as client:
+        resp = client.post(f"/api/v1/missions/{_MISSION_ID}/close")
+
+    assert resp.status_code == status
+
+
 def test_reset_is_gone():
     with TestClient(_app(MissionNotFoundError(_MISSION_ID))) as client:
         assert client.post(f"/api/v1/missions/{_MISSION_ID}/reset").status_code == 410
+
+
+# Planning a coverage stage on create or update can fail on the field, the robot or the planner.
+_AUTHORING_PLAN_CASES = [
+    (FieldNotFoundError(_FIELD_ID), 422),
+    (FieldNotPlannable(_FIELD_ID), 422),
+    (RobotFactsheetMissing("scout"), 422),
+    (RobotPhysicalParametersMissing("scout"), 422),
+    (UnsupportedStageKind("scout", _STAGE_ID, "coverage"), 422),
+    (TurningRadiusBelowRobot("scout", 1.0, 1.5), 422),
+    (CoveragePlanRejected("the plan covers 40 m2 of a 170 m2 field"), 422),
+    (CoveragePlannerUnavailable("coverage planner unreachable"), 503),
+]
+
+
+def _authoring_app(error: Exception):
+    app = create_app(Settings(zenoh_disabled=True, auto_migrate=False))
+
+    class _Raises:
+        async def create(self, command):
+            raise error
+
+        async def update(self, command):
+            raise error
+
+    app.dependency_overrides[get_mission_repository] = lambda: InMemoryMissionRepository()
+    app.dependency_overrides[get_mission_run_repository] = lambda: InMemoryMissionRunRepository()
+    app.dependency_overrides[get_mission_management_use_case] = lambda: _Raises()
+    return app
+
+
+_COVERAGE_STAGE_BODY = {
+    "kind": "coverage",
+    "field_id": str(_FIELD_ID),
+    "operation_width_m": 3.0,
+    "params_robot_id": "scout",
+}
+
+
+@pytest.mark.parametrize("error,status", _AUTHORING_PLAN_CASES, ids=lambda v: type(v).__name__)
+def test_create_maps_each_planning_error_to_its_status(error, status):
+    with TestClient(_authoring_app(error)) as client:
+        resp = client.post(
+            "/api/v1/missions/", json={"name": "m", "stages": [_COVERAGE_STAGE_BODY]}
+        )
+
+    assert resp.status_code == status
+
+
+@pytest.mark.parametrize("error,status", _AUTHORING_PLAN_CASES, ids=lambda v: type(v).__name__)
+def test_update_maps_each_planning_error_to_its_status(error, status):
+    with TestClient(_authoring_app(error)) as client:
+        resp = client.patch(
+            f"/api/v1/missions/{_MISSION_ID}", json={"stages": [_COVERAGE_STAGE_BODY]}
+        )
+
+    assert resp.status_code == status
 
 
 def _plan_app(error: Exception):

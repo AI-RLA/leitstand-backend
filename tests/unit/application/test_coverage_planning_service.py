@@ -40,6 +40,7 @@ from leitstand_backend.domain.model.robot.robot_factsheet import (
     WaypointKind,
 )
 from leitstand_backend.ports.inbound.coverage_planning import PlanCoverageCommand
+from tests.fakes.coverage_stage_planning import bind_stage_planning
 from tests.fakes.fake_coverage_planner import FakeCoveragePlanner
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_field_repository import InMemoryFieldRepository
@@ -185,6 +186,8 @@ def _make_svc(field: Field | None = None, plan: CoveragePlan | None = None):
     async def audit(action, target_type, target_id, payload):
         return None
 
+    planner = FakeCoveragePlanner(plan if plan is not None else _plan())
+    plan_stage, unchanged, _ = bind_stage_planning(fields, factsheets, planner)
     mission_uc = MissionManagementService(
         repo=missions,
         runs=runs,
@@ -193,8 +196,9 @@ def _make_svc(field: Field | None = None, plan: CoveragePlan | None = None):
         audit=audit,
         sites=InMemorySiteRepository(),
         fields=fields,
+        planner=plan_stage,
+        unchanged=unchanged,
     )
-    planner = FakeCoveragePlanner(plan if plan is not None else _plan())
     svc = CoveragePlanningService(
         fields=fields,
         factsheets=factsheets,

@@ -44,6 +44,18 @@ class RobotPhysicalParametersMissing(DomainError):
         self.robot_id = robot_id
 
 
+class TurningRadiusBelowRobot(DomainError):
+    """A turning radius entered by hand is tighter than the chosen robot can drive."""
+
+    def __init__(self, robot_id: str, given_m: float, min_m: float):
+        super().__init__(
+            f"{robot_id} cannot turn tighter than {min_m:.2f} m; {given_m:.2f} m was requested"
+        )
+        self.robot_id = robot_id
+        self.given_m = given_m
+        self.min_m = min_m
+
+
 class CoveragePlanRejected(DomainError):
     """A returned coverage plan failed a validity check, so no mission was created."""
 
@@ -317,8 +329,29 @@ class MissionDispatchTimeout(DomainError):
     """Robot did not reply to the dispatch queryable within the timeout."""
 
     def __init__(self, run_id: UUID, robot_id: str):
-        super().__init__(f"robot {robot_id!r} did not acknowledge run {run_id}")
+        super().__init__(
+            f"robot {robot_id!r} did not answer the dispatch of run {run_id} in time; the run "
+            "stays pending until the robot reports it or it is cancelled"
+        )
         self.run_id = run_id
+        self.robot_id = robot_id
+
+
+class RobotOnline(DomainError):
+    """The robot can answer, so a run of it is cancelled through it rather than closed over it."""
+
+    def __init__(self, robot_id: str):
+        super().__init__(
+            f"robot {robot_id!r} is online; cancel the run and let the robot confirm it"
+        )
+        self.robot_id = robot_id
+
+
+class RobotOffline(DomainError):
+    """The robot's liveliness token is absent, so a run would only wait for it."""
+
+    def __init__(self, robot_id: str):
+        super().__init__(f"robot {robot_id!r} is offline; a run is not started for it")
         self.robot_id = robot_id
 
 

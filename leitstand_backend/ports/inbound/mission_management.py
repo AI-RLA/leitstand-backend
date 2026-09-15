@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from leitstand_backend.domain.model.mission.mission import Mission, Stage
 from leitstand_backend.domain.model.mission.waypoint import Waypoint
@@ -39,21 +39,103 @@ class NavigationStageInput(BaseModel):
     )
 
 
-class CoverageStageRef(BaseModel):
-    """A coverage stage this mission already has, carried through an edit unchanged.
+class CoveragePlanningFields(BaseModel):
+    """What a coverage stage is planned from; the stage input and the preview query share it."""
 
-    Swaths are a planner's output, so there is no way to write one here: the stage is named, and
-    the stored segments and provenance are kept as they are. Naming a stage of another mission,
-    or one that is not coverage, is refused.
+    field_id: UUID | None = Field(default=None, description="Field to cover, from list_fields.")
+    operation_width_m: float | None = Field(
+        default=None, gt=0, description="Working width of the mounted implement, in metres."
+    )
+    params_robot_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Robot whose factsheet supplies the turning radius and track width; omit for values "
+            "entered by hand."
+        ),
+    )
+    turning_radius_m: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Minimum turning radius in metres. Required without params_robot_id; with one, it "
+            "may only widen the robot's own."
+        ),
+    )
+    headland_width_m: float | None = Field(
+        default=None,
+        ge=0,
+        description="Turning space kept inside the field; the radius when omitted.",
+    )
+    swath_angle_deg: float | None = Field(
+        default=None,
+        ge=0,
+        lt=180,
+        description="Bearing of the swaths; the planner chooses when omitted.",
+    )
+    allow_overlap: bool = Field(
+        default=False, description="Whether the last pass may overlap the one before it."
+    )
+
+    @model_validator(mode="after")
+    def _robot_or_radius(self) -> CoveragePlanningFields:
+        if (
+            self.field_id is not None
+            and self.params_robot_id is None
+            and self.turning_radius_m is None
+        ):
+            raise ValueError("planning a coverage stage needs params_robot_id or turning_radius_m")
+        return self
+
+
+class CoverageStageInput(CoveragePlanningFields):
+    """A coverage stage: carried unchanged when only ``stage_id`` is given, planned otherwise.
+
+    The path is never written here; the backend plans it from the field and the machine values.
+    ``stage_id`` keeps the stage's identity across a re-plan, so its runs stay comparable.
     """
 
     kind: Literal["coverage"] = "coverage"
-    stage_id: UUID
+    stage_id: UUID | None = None
+    on_cancel: list["StageInput"] | None = Field(
+        default=None,
+        description=(
+            "Cleanup stages executed sequentially when this stage is cancelled. "
+            "Cleanup stages are themselves non-cancellable."
+        ),
+    )
+
+    @property
+    def carries(self) -> bool:
+        return self.field_id is None
+
+    @model_validator(mode="after")
+    def _carry_or_plan(self) -> CoverageStageInput:
+        if self.carries:
+            if self.stage_id is None:
+                raise ValueError(
+                    "a coverage stage needs a stage_id to carry, or field_id and "
+                    "operation_width_m to plan"
+                )
+            given = (
+                self.operation_width_m,
+                self.params_robot_id,
+                self.turning_radius_m,
+                self.headland_width_m,
+                self.swath_angle_deg,
+            )
+            if any(v is not None for v in given) or self.allow_overlap:
+                raise ValueError("a carried coverage stage takes no planning inputs")
+            return self
+        if self.operation_width_m is None:
+            raise ValueError("planning a coverage stage needs operation_width_m")
+        return self
 
 
-StageInput = Annotated[NavigationStageInput | CoverageStageRef, Field(discriminator="kind")]
+StageInput = Annotated[NavigationStageInput | CoverageStageInput, Field(discriminator="kind")]
 
 NavigationStageInput.model_rebuild()
+CoverageStageInput.model_rebuild()
 
 
 class CreateMissionCommand(BaseModel):
@@ -87,11 +169,7 @@ class RestoreMissionCommand(BaseModel):
 
 
 class CreateGeneratedMissionCommand(BaseModel):
-    """The planner's own create path, carrying stages it produced rather than stage inputs.
-
-    A coverage stage cannot be expressed as a stage input at all, because its segments and its
-    provenance are made together and only by a planner.
-    """
+    """The assistant's coverage route: a mission from stages a planner already produced."""
 
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None

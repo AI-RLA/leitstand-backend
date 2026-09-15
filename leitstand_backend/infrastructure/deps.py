@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -27,6 +28,13 @@ from leitstand_backend.adapters.outbound.persistence.postgres.site_repository_ad
     PostgresSiteRepositoryAdapter,
 )
 from leitstand_backend.application.coverage_planning_service import CoveragePlanningService
+from leitstand_backend.application.coverage_stage_planner import (
+    CoverageInputs,
+    CoverageStagePlanner,
+    CoverageStageUnchanged,
+    plan_coverage_stage,
+    unchanged,
+)
 from leitstand_backend.application.field_management_service import FieldManagementService
 from leitstand_backend.application.fleet_view_service import FleetViewService
 from leitstand_backend.application.mission_management_service import MissionManagementService
@@ -43,6 +51,7 @@ from leitstand_backend.domain.model.audit import (
     AUTHORITY_APPROVED_PROPOSAL,
     AUTHORITY_AUTONOMOUS,
 )
+from leitstand_backend.domain.model.mission.mission import CoverageStage
 from leitstand_backend.domain.model.mission.mission_run import MissionRun, RunOrigin
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.user import User
@@ -251,6 +260,43 @@ def get_factsheet_view(request: Request) -> RobotFactsheetView:
     return request.app.state.factsheet_view
 
 
+def get_coverage_planner(request: Request) -> CoveragePlanner:
+    return request.app.state.coverage_planner
+
+
+def get_coverage_stage_planner(
+    request: Request,
+    fields: FieldRepository = Depends(get_field_repository),
+    factsheets: RobotFactsheetView = Depends(get_factsheet_view),
+    planner: CoveragePlanner = Depends(get_coverage_planner),
+) -> CoverageStagePlanner:
+    """Bind the planner function to this request's repositories, so services stay free of infrastructure."""
+    settings = request.app.state.settings
+
+    async def _plan(inputs: CoverageInputs, *, stage_id: UUID | None = None) -> CoverageStage:
+        return await plan_coverage_stage(
+            inputs,
+            fields=fields,
+            factsheets=factsheets,
+            planner=planner,
+            turn_sample_m=settings.coverage_turn_sample_m,
+            linear_curv_change=settings.coverage_linear_curv_change,
+            stage_id=stage_id,
+        )
+
+    return _plan
+
+
+def get_coverage_stage_unchanged(
+    fields: FieldRepository = Depends(get_field_repository),
+    factsheets: RobotFactsheetView = Depends(get_factsheet_view),
+) -> CoverageStageUnchanged:
+    async def _unchanged(inputs: CoverageInputs, stored: CoverageStage) -> bool:
+        return await unchanged(inputs, stored, fields=fields, factsheets=factsheets)
+
+    return _unchanged
+
+
 def get_mission_management_use_case(
     repo: MissionRepository = Depends(get_mission_repository),
     runs: MissionRunRepository = Depends(get_mission_run_repository),
@@ -259,6 +305,8 @@ def get_mission_management_use_case(
     audit: AuditWriter = Depends(get_audit_writer),
     sites: SiteRepository = Depends(get_site_repository),
     fields: FieldRepository = Depends(get_field_repository),
+    planner: CoverageStagePlanner = Depends(get_coverage_stage_planner),
+    unchanged: CoverageStageUnchanged = Depends(get_coverage_stage_unchanged),
 ) -> MissionManagementUseCase:
     return MissionManagementService(
         repo=repo,
@@ -268,6 +316,8 @@ def get_mission_management_use_case(
         audit=audit,
         sites=sites,
         fields=fields,
+        planner=planner,
+        unchanged=unchanged,
     )
 
 
@@ -278,6 +328,7 @@ def get_run_management_use_case(
     factsheets: RobotFactsheetView = Depends(get_factsheet_view),
     fields: FieldRepository = Depends(get_field_repository),
     sites: SiteRepository = Depends(get_site_repository),
+    robots: RobotRepository = Depends(get_robot_repository),
     events: EventPublisher = Depends(get_transactional_event_publisher),
     audit: AuditWriter = Depends(get_audit_writer),
 ) -> RunManagementUseCase:
@@ -292,6 +343,7 @@ def get_run_management_use_case(
         factsheets=factsheets,
         fields=fields,
         sites=sites,
+        robots=robots,
         events=events,
         audit=audit,
     )
@@ -308,10 +360,6 @@ def current_run_origin() -> RunOrigin:
         actor=ctx.actor,
         tool_call_id=call.tool_call_id if call is not None and call.approved else None,
     )
-
-
-def get_coverage_planner(request: Request) -> CoveragePlanner:
-    return request.app.state.coverage_planner
 
 
 def get_coverage_planning_use_case(
@@ -368,6 +416,7 @@ class _RunStartOrchestrator:
             factsheets=self._factsheets,
             fields=PostgresFieldRepositoryAdapter(session),
             sites=PostgresSiteRepositoryAdapter(session),
+            robots=PostgresRobotRepositoryAdapter(session),
             events=TransactionBoundEventPublisher(session, self._bus),
             audit=_make_audit_writer(session, self._current_user),
         )

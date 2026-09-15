@@ -35,6 +35,7 @@ from leitstand_backend.adapters.inbound.messaging.zenoh.robot.robot_telemetry_ad
     ZenohRobotTelemetryAdapter,
 )
 from leitstand_backend.adapters.inbound.web.chat.routes import router as chat_router
+from leitstand_backend.adapters.inbound.web.coverage.routes import router as coverage_router
 from leitstand_backend.adapters.inbound.web.fields.routes import router as fields_router
 from leitstand_backend.adapters.inbound.web.missions.routes import router as missions_router
 from leitstand_backend.adapters.inbound.web.robots.routes import router as robots_router
@@ -629,6 +630,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(fields_router, dependencies=protected)
     app.include_router(robots_router, dependencies=protected)
     app.include_router(missions_router, dependencies=protected)
+    app.include_router(coverage_router, dependencies=protected)
     app.include_router(runs_router, dependencies=protected)
     app.include_router(sites_router, dependencies=protected)
     app.include_router(users_router, dependencies=protected)

@@ -29,7 +29,7 @@ def coverage_provenance(
     boundary_digest: str = "digest",
     operation_width_m: float = 3.0,
     turning_radius_m: float = 1.5,
-    planned_for_robot_id: str = "planner-robot",
+    planned_for_robot_id: str | None = "planner-robot",
 ) -> CoverageProvenance:
     return CoverageProvenance(
         field_id=field_id or uuid4(),

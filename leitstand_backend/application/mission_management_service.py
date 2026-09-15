@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from leitstand_backend.application.coverage_boundary import require_current_boundary
+from leitstand_backend.application.coverage_stage_planner import (
+    CoverageInputs,
+    CoverageStagePlanner,
+    CoverageStageUnchanged,
+)
 from leitstand_backend.domain.errors import (
     DuplicateStageId,
     MissionArchived,
@@ -25,6 +30,7 @@ from leitstand_backend.domain.model.mission.mission import (
     Stage,
     referenced_site_ids,
     replace_stage,
+    stage_ids,
 )
 from leitstand_backend.domain.model.mission.robot_fit import (
     validate_against_factsheet,
@@ -34,9 +40,10 @@ from leitstand_backend.domain.model.mission.stage_rules import (
     validate_homogeneous_frames,
     validate_single_site,
 )
+from leitstand_backend.domain.model.mission.stages_digest import stages_digest
 from leitstand_backend.ports.inbound.mission_management import (
     AssignMissionCommand,
-    CoverageStageRef,
+    CoverageStageInput,
     CreateGeneratedMissionCommand,
     CreateMissionCommand,
     DeleteMissionCommand,
@@ -66,6 +73,8 @@ class MissionManagementService(MissionManagementUseCase):
         audit: AuditWriter,
         sites: SiteRepository,
         fields: FieldRepository,
+        planner: CoverageStagePlanner,
+        unchanged: CoverageStageUnchanged,
     ):
         self._repo = repo
         self._runs = runs
@@ -74,9 +83,12 @@ class MissionManagementService(MissionManagementUseCase):
         self._audit = audit
         self._sites = sites
         self._fields = fields
+        self._planner = planner
+        self._unchanged = unchanged
 
     async def create(self, command: CreateMissionCommand) -> Mission:
-        stages = _with_ids(command.stages, existing=frozenset(), mission_id=None)
+        planned = await self._plan_inputs(command.stages, stored={})
+        stages = _with_ids(command.stages, existing=frozenset(), mission_id=None, planned=planned)
         await self._validate_shape(stages)
 
         now = datetime.now(timezone.utc)
@@ -101,9 +113,23 @@ class MissionManagementService(MissionManagementUseCase):
             mission_topic(saved.mission_id, "created"),
             {"mission_id": str(saved.mission_id)},
         )
+        await self._audit_planned(saved.mission_id, planned, before=[], after=saved.stages)
         return saved
 
     async def update(self, command: UpdateMissionCommand) -> Mission:
+        # Planning takes seconds and holds no lock: a planner call under the mission's row lock
+        # would stall every dispatch of it meanwhile.
+        planned: dict[tuple[int, ...], CoverageStage] = {}
+        if command.stages is not None:
+            unlocked = await self._repo.get(command.mission_id)
+            if unlocked is None:
+                raise MissionNotFoundError(command.mission_id)
+            if unlocked.archived_at is not None:
+                raise MissionArchived(command.mission_id)
+            planned = await self._plan_inputs(
+                command.stages, _by_stage_id(unlocked.stages), command.mission_id
+            )
+
         # Under the row lock so a concurrent dispatch snapshots either the old stages or the new,
         # never a mix. Editing while a run is active is fine: the run carries its own copy.
         before = await self._repo.get_for_update(command.mission_id)
@@ -115,11 +141,15 @@ class MissionManagementService(MissionManagementUseCase):
         stages = before.stages
         if command.stages is not None:
             stored = _by_stage_id(before.stages)
+            planned = await self._replan_changed_meanwhile(
+                before.mission_id, command.stages, stored, planned
+            )
             stages = _with_ids(
                 command.stages,
                 existing=frozenset(stored),
                 mission_id=before.mission_id,
                 stored=stored,
+                planned=planned,
             )
             await self._validate_shape(stages)
 
@@ -142,6 +172,9 @@ class MissionManagementService(MissionManagementUseCase):
                 "before": before.model_dump(mode="json"),
                 "patch": command.model_dump(mode="json", exclude_none=True),
             },
+        )
+        await self._audit_planned(
+            saved.mission_id, planned, before=before.stages, after=saved.stages
         )
         return saved
 
@@ -266,6 +299,87 @@ class MissionManagementService(MissionManagementUseCase):
     async def list(self, *, include_archived: bool = False) -> list[Mission]:
         return await self._repo.list(include_archived=include_archived)
 
+    async def _plan_inputs(
+        self,
+        inputs: Sequence[StageInput],
+        stored: Mapping[UUID, Stage],
+        mission_id: UUID | None = None,
+    ) -> dict[tuple[int, ...], CoverageStage]:
+        """Plan every coverage input whose stored plan would not be reproduced; keyed by input path.
+
+        The planner container serves one request at a time, so inputs are planned one after
+        another. A planner error propagates before anything is written.
+        """
+        # Ids are checked before the first planner call, so a request refused for its ids does
+        # not first spend seconds planning.
+        seen: set[UUID] = set()
+        for _path, stage in _walk_inputs(inputs):
+            if stage.stage_id is None:
+                continue
+            if stage.stage_id in seen:
+                raise DuplicateStageId(stage.stage_id)
+            seen.add(stage.stage_id)
+            if isinstance(stage, CoverageStageInput) and not isinstance(
+                stored.get(stage.stage_id), CoverageStage
+            ):
+                raise StageNotInMission(mission_id, stage.stage_id)
+
+        planned: dict[tuple[int, ...], CoverageStage] = {}
+        for path, stage in _coverage_inputs_to_plan(inputs):
+            fresh = await self._plan_if_changed(stage, stored)
+            if fresh is not None:
+                planned[path] = fresh
+        return planned
+
+    async def _replan_changed_meanwhile(
+        self,
+        mission_id: UUID,
+        inputs: Sequence[StageInput],
+        stored: Mapping[UUID, Stage],
+        planned: dict[tuple[int, ...], CoverageStage],
+    ) -> dict[tuple[int, ...], CoverageStage]:
+        """Plan, under the lock, an input skipped as unchanged against a stage edited meanwhile."""
+        for path, stage in _coverage_inputs_to_plan(inputs):
+            if path in planned:
+                continue
+            if not isinstance(stored.get(stage.stage_id), CoverageStage):
+                raise StageNotInMission(mission_id, stage.stage_id)
+            fresh = await self._plan_if_changed(stage, stored)
+            if fresh is not None:
+                planned[path] = fresh
+        return planned
+
+    async def _plan_if_changed(
+        self, stage: CoverageStageInput, stored: Mapping[UUID, Stage]
+    ) -> CoverageStage | None:
+        """Plan the input unless the stage it names would be reproduced as stored."""
+        inputs = CoverageInputs.from_fields(stage)
+        kept = stored.get(stage.stage_id) if stage.stage_id is not None else None
+        if isinstance(kept, CoverageStage) and await self._unchanged(inputs, kept):
+            return None
+        return await self._planner(inputs, stage_id=stage.stage_id)
+
+    async def _audit_planned(
+        self,
+        mission_id: UUID,
+        planned: Mapping[tuple[int, ...], CoverageStage],
+        *,
+        before: Sequence[Stage],
+        after: Sequence[Stage],
+    ) -> None:
+        if not planned:
+            return
+        await self._audit(
+            "mission.plan_stage",
+            "mission",
+            str(mission_id),
+            {
+                "stage_ids": [str(stage.stage_id) for stage in planned.values()],
+                "old_digest": stages_digest(before) if before else None,
+                "new_digest": stages_digest(after),
+            },
+        )
+
     async def _validate_shape(self, stages: list[Stage]) -> None:
         """Every stage is driven in one frame, at sites that exist, and at one site at most.
 
@@ -297,34 +411,51 @@ def _by_stage_id(stages: Sequence[Stage]) -> dict[UUID, Stage]:
     return found
 
 
+def _walk_inputs(
+    inputs: Sequence[StageInput], path: tuple[int, ...] = ()
+) -> Iterator[tuple[tuple[int, ...], StageInput]]:
+    """Every stage input with its position in the request, cleanup children included."""
+    for index, stage in enumerate(inputs):
+        here = (*path, index)
+        yield here, stage
+        if stage.on_cancel:
+            yield from _walk_inputs(stage.on_cancel, here)
+
+
+def _coverage_inputs_to_plan(
+    inputs: Sequence[StageInput],
+) -> list[tuple[tuple[int, ...], CoverageStageInput]]:
+    """Every coverage input that carries planning inputs, with its position in the request."""
+    return [
+        (path, stage)
+        for path, stage in _walk_inputs(inputs)
+        if isinstance(stage, CoverageStageInput) and not stage.carries
+    ]
+
+
 def _with_ids(
     inputs: Sequence[StageInput],
     *,
     existing: frozenset[UUID],
     mission_id: UUID | None,
     stored: Mapping[UUID, Stage] | None = None,
+    planned: Mapping[tuple[int, ...], CoverageStage] | None = None,
 ) -> list[Stage]:
     """Give each requested stage its identity: kept when the caller names one, assigned otherwise.
 
     Recurses into ``on_cancel`` because the robot reports cleanup stages under the same
-    ``stage_id`` join. A supplied id must be one of this mission's and appear once; a coverage
-    stage is resolved from ``stored``, because only the planner writes its path.
+    ``stage_id`` join. A supplied id must be one of this mission's and appear once. A coverage
+    stage comes from ``planned`` when its inputs were planned for this request, otherwise from
+    ``stored`` under its id.
     """
     seen: set[UUID] = set()
     by_id = stored or {}
+    by_path = planned or {}
 
-    def build(stages: Sequence[StageInput]) -> list[Stage]:
+    def build(stages: Sequence[StageInput], path: tuple[int, ...]) -> list[Stage]:
         staged: list[Stage] = []
-        for stage in stages:
-            if isinstance(stage, CoverageStageRef):
-                if stage.stage_id in seen:
-                    raise DuplicateStageId(stage.stage_id)
-                kept = by_id.get(stage.stage_id)
-                if not isinstance(kept, CoverageStage):
-                    raise StageNotInMission(mission_id, stage.stage_id)
-                seen.add(stage.stage_id)
-                staged.append(kept)
-                continue
+        for index, stage in enumerate(stages):
+            here = (*path, index)
             stage_id = stage.stage_id
             if stage_id is not None:
                 if stage_id in seen:
@@ -332,16 +463,31 @@ def _with_ids(
                 if stage_id not in existing:
                     raise StageNotInMission(mission_id, stage_id)
                 seen.add(stage_id)
-            else:
-                stage_id = uuid4()
-            on_cancel = build(stage.on_cancel) if stage.on_cancel else None
+            on_cancel = build(stage.on_cancel, here) if stage.on_cancel else None
+            if isinstance(stage, CoverageStageInput):
+                resolved = by_path.get(here)
+                if resolved is None:
+                    kept = by_id.get(stage_id) if stage_id is not None else None
+                    if not isinstance(kept, CoverageStage):
+                        raise StageNotInMission(mission_id, stage_id)
+                    resolved = kept
+                # A carried stage is carried whole; only a request that names children (an empty
+                # list included) or that re-plans the stage says anything about them.
+                if stage.carries and stage.on_cancel is None:
+                    on_cancel = resolved.on_cancel
+                    for child_id in stage_ids(on_cancel or []):
+                        if child_id in seen:
+                            raise DuplicateStageId(child_id)
+                        seen.add(child_id)
+                staged.append(resolved.model_copy(update={"on_cancel": on_cancel}))
+                continue
             staged.append(
                 NavigationStage(
-                    stage_id=stage_id,
+                    stage_id=stage_id or uuid4(),
                     waypoints=stage.waypoints,
                     on_cancel=on_cancel,
                 )
             )
         return staged
 
-    return build(inputs)
+    return build(inputs, ())

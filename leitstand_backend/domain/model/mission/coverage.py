@@ -168,7 +168,22 @@ class CoverageProvenance(BaseModel):
     params: CoverageParams
     metrics: CoverageMetrics
     planner_version: str = Field(min_length=1)
-    planned_for_robot_id: str = Field(min_length=1)
+    planned_for_robot_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Robot whose factsheet supplied the machine values; None when they were entered by "
+            "hand."
+        ),
+    )
+    param_sources: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Where each machine value came from, by parameter name: 'factsheet:<robot_id>', "
+            "'manual', 'turning_radius' for a headland defaulted to the radius, or 'planner' for "
+            "a swath direction the planner chose. Absent on a plan made before it was recorded."
+        ),
+    )
     planned_at: datetime
 
 

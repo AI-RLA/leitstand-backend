@@ -26,6 +26,8 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotOffline,
+    RobotOnline,
     RobotRefusedControl,
     RobotUnreachable,
     RunNotFoundError,
@@ -42,6 +44,7 @@ from leitstand_backend.domain.model.mission.run_lifecycle import RunTrigger
 from leitstand_backend.domain.model.mission.run_status import RunStatus
 from leitstand_backend.domain.model.mission.stages_digest import stages_digest
 from leitstand_backend.domain.model.mission.waypoint import SiteLocalWaypoint, WGS84Waypoint
+from leitstand_backend.domain.model.robot.robot import Metadata
 from leitstand_backend.domain.model.robot.robot_factsheet import (
     CoverageCapability,
     NavigationCapability,
@@ -60,6 +63,7 @@ from leitstand_backend.ports.inbound.mission_state import RecordMissionStateComm
 from leitstand_backend.ports.inbound.run_management import (
     AnnotateRunCommand,
     CancelRunCommand,
+    CloseRunCommand,
     DispatchOutcome,
     PauseRunCommand,
     ResumeRunCommand,
@@ -68,12 +72,14 @@ from leitstand_backend.ports.inbound.run_management import (
 )
 from leitstand_backend.ports.outbound.event_publisher import mission_topic
 from leitstand_backend.ports.outbound.mission_dispatcher import ControlReply
+from tests.fakes.coverage_stage_planning import bind_stage_planning
 from tests.fakes.fake_mission_dispatcher import FakeMissionDispatcher
 from tests.fakes.in_memory_event_publisher import InMemoryEventPublisher
 from tests.fakes.in_memory_field_repository import InMemoryFieldRepository
 from tests.fakes.in_memory_mission_repository import InMemoryMissionRepository
 from tests.fakes.in_memory_mission_run_repository import InMemoryMissionRunRepository
 from tests.fakes.in_memory_robot_factsheet_view import InMemoryRobotFactsheetView
+from tests.fakes.in_memory_robot_repository import InMemoryRobotRepository
 from tests.fakes.in_memory_site_repository import InMemorySiteRepository
 from tests.fakes.planned_coverage import coverage_stage_for, seeded_field
 
@@ -111,6 +117,7 @@ class _World:
         self.events = InMemoryEventPublisher()
         self.fields = InMemoryFieldRepository()
         self.sites = InMemorySiteRepository()
+        self.robots = InMemoryRobotRepository()
         self.audit_calls: list[dict] = []
         self.factsheets.set(_factsheet(ROBOT_A))
         self.factsheets.set(_factsheet(ROBOT_B))
@@ -132,9 +139,11 @@ class _World:
             factsheets=self.factsheets,
             fields=self.fields,
             sites=self.sites,
+            robots=self.robots,
             events=self.events,
             audit=audit,
         )
+        plan, unchanged, _ = bind_stage_planning(self.fields, self.factsheets)
         self.mission_service = MissionManagementService(
             repo=self.missions,
             runs=self.runs,
@@ -143,6 +152,8 @@ class _World:
             audit=audit,
             sites=self.sites,
             fields=self.fields,
+            planner=plan,
+            unchanged=unchanged,
         )
         self.state_service = MissionStateService(runs=self.runs, events=self.events)
 
@@ -1141,3 +1152,119 @@ async def test_the_cancel_mode_reaches_the_robot():
     )
 
     assert w.dispatcher.cancelled == [(run.run_id, ROBOT_A, CancelMode.IMMEDIATE)]
+
+
+@pytest.mark.asyncio
+async def test_a_run_is_refused_for_a_robot_the_fleet_knows_to_be_offline():
+    """A dispatch to an offline robot would only time out and leave a pending run behind."""
+    world = _World()
+    await world.robots.record_online(ROBOT_A, Metadata(id=ROBOT_A))
+    await world.robots.record_offline(ROBOT_A)
+    mission = await world.mission()
+
+    with pytest.raises(RobotOffline):
+        await world.start(mission.mission_id, ROBOT_A)
+
+    assert await world.runs.list_active_by_robot(ROBOT_A) == []
+    assert world.dispatcher.dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_a_robot_the_fleet_has_never_seen_is_judged_by_its_factsheet_alone():
+    """No robot row means no online verdict; the factsheet check answers for an unknown id."""
+    world = _World()
+    mission = await world.mission()
+
+    run = await world.start(mission.mission_id, ROBOT_A)
+
+    assert run.status is RunStatus.DISPATCHED
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_run_whose_robot_is_offline_does_not_wait_for_it():
+    """The cancel is written and left to the reconnect reconciliation; no RPC, no timeout."""
+    world = _World()
+    await world.robots.record_online(ROBOT_A, Metadata(id=ROBOT_A))
+    mission = await world.mission()
+    run = await world.start(mission.mission_id, ROBOT_A)
+    await world.robots.record_offline(ROBOT_A)
+    world.dispatcher.cancelled.clear()
+
+    cancelled = await world.run_service.cancel(
+        CancelRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
+    )
+
+    assert cancelled.status is RunStatus.CANCELLING
+    assert world.dispatcher.cancelled == []
+    assert cancelled.transitions[-1].acknowledged is False
+    assert cancelled.transitions[-1].detail["deferred"] == "robot offline"
+
+
+@pytest.mark.asyncio
+async def test_pausing_a_run_whose_robot_is_offline_is_refused_at_once():
+    world = _World()
+    await world.robots.record_online(ROBOT_A, Metadata(id=ROBOT_A))
+    mission = await world.mission()
+    run = await world.start(mission.mission_id, ROBOT_A)
+    await world.robots.record_offline(ROBOT_A)
+
+    with pytest.raises(RobotOffline):
+        await world.run_service.pause(
+            PauseRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
+        )
+
+    assert (await world.runs.get(run.run_id)).status is run.status
+
+
+@pytest.mark.asyncio
+async def test_an_operator_closes_a_run_whose_robot_is_offline():
+    world = _World()
+    await world.robots.record_online(ROBOT_A, Metadata(id=ROBOT_A))
+    mission = await world.mission()
+    run = await world.start(mission.mission_id, ROBOT_A)
+    await world.robots.record_offline(ROBOT_A)
+
+    closed = await world.run_service.close(
+        CloseRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
+    )
+
+    assert closed.status is RunStatus.CANCELLED
+    assert closed.ended_at is not None
+    stored = await world.runs.get(run.run_id)
+    assert stored.transitions[-1].trigger is RunTrigger.CLOSE
+    assert stored.transitions[-1].actor == "operator"
+    assert world.dispatcher.cancelled == []
+    assert await world.runs.list_active_by_robot(ROBOT_A) == []
+    assert any(call["action"] == "run.close" for call in world.audit_calls)
+    assert world.lifecycle()[-1]["status"] == "CANCELLED"
+    assert world.lifecycle()[-1]["trigger"] == "close"
+
+
+@pytest.mark.asyncio
+async def test_closing_a_run_whose_robot_is_online_is_refused():
+    world = _World()
+    await world.robots.record_online(ROBOT_A, Metadata(id=ROBOT_A))
+    mission = await world.mission()
+    run = await world.start(mission.mission_id, ROBOT_A)
+
+    with pytest.raises(RobotOnline):
+        await world.run_service.close(
+            CloseRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
+        )
+
+    assert (await world.runs.get(run.run_id)).status is RunStatus.DISPATCHED
+
+
+@pytest.mark.asyncio
+async def test_a_finished_run_cannot_be_closed():
+    world = _World()
+    await world.robots.record_online(ROBOT_A, Metadata(id=ROBOT_A))
+    mission = await world.mission()
+    run = await world.start(mission.mission_id, ROBOT_A)
+    await world.complete(run)
+    await world.robots.record_offline(ROBOT_A)
+
+    with pytest.raises(InvalidMissionTransition):
+        await world.run_service.close(
+            CloseRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
+        )

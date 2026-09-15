@@ -26,6 +26,7 @@ from leitstand_backend.ports.inbound.mission_management import (
 )
 from leitstand_backend.ports.inbound.run_management import (
     CancelRunCommand,
+    CloseRunCommand,
     PauseRunCommand,
     ResumeRunCommand,
     StartRunCommand,
@@ -82,6 +83,10 @@ def to_cancel_command(mission_id: UUID, body: CancelBody | None) -> CancelRunCom
     if body is None:
         return CancelRunCommand(mission_id=mission_id)
     return CancelRunCommand(mission_id=mission_id, run_id=body.run_id, mode=body.mode)
+
+
+def to_close_command(mission_id: UUID, run_id: UUID | None) -> CloseRunCommand:
+    return CloseRunCommand(mission_id=mission_id, run_id=run_id)
 
 
 def to_pause_command(mission_id: UUID, run_id: UUID | None) -> PauseRunCommand:

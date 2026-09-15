@@ -20,6 +20,8 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotOffline,
+    RobotOnline,
     RobotRefusedControl,
     RobotUnreachable,
     RunNotFoundError,
@@ -53,6 +55,7 @@ from leitstand_backend.domain.model.mission.stages_digest import stages_digest
 from leitstand_backend.ports.inbound.run_management import (
     AnnotateRunCommand,
     CancelRunCommand,
+    CloseRunCommand,
     DeleteRunCommand,
     DispatchOutcome,
     PauseRunCommand,
@@ -68,6 +71,7 @@ from leitstand_backend.ports.outbound.mission_dispatcher import MissionDispatche
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
 from leitstand_backend.ports.outbound.robot_factsheet_view import RobotFactsheetView
+from leitstand_backend.ports.outbound.robot_repository import RobotRepository
 from leitstand_backend.ports.outbound.site_repository import SiteRepository
 
 
@@ -80,12 +84,14 @@ class RunService(RunManagementUseCase):
         factsheets: RobotFactsheetView,
         fields: FieldRepository,
         sites: SiteRepository,
+        robots: RobotRepository,
         events: EventPublisher,
         audit: AuditWriter,
     ):
         self._missions = missions
         self._runs = runs
         self._dispatcher = dispatcher
+        self._robots = robots
         self._factsheets = factsheets
         self._fields = fields
         self._sites = sites
@@ -136,6 +142,10 @@ class RunService(RunManagementUseCase):
         if active and not command.allow_concurrent:
             raise MissionRunInProgress(command.mission_id, [run.run_id for run in active])
 
+        # A robot the fleet cannot reach is refused up front: the dispatch would only time out
+        # and leave a pending run for an operator to clean up.
+        if await self._offline(robot_id):
+            raise RobotOffline(robot_id)
         factsheet = self._factsheets.latest(robot_id)
         if factsheet is None:
             raise RobotFactsheetMissing(robot_id)
@@ -219,7 +229,7 @@ class RunService(RunManagementUseCase):
                 if command.outcome is DispatchOutcome.ERROR
                 else (
                     "dispatch_timeout",
-                    "The robot did not acknowledge the dispatch in time.",
+                    "The robot did not answer the dispatch in time.",
                 )
             )
             if run.status is RunStatus.PENDING:
@@ -338,6 +348,12 @@ class RunService(RunManagementUseCase):
             {"run_id": str(run.run_id), "mode": command.mode.value},
         )
 
+        if await self._offline(run.robot_id):
+            # Nothing can answer now; the reconnect reconciliation sends the cancel and settles
+            # the run, so the operator is not held for a timeout that says nothing new.
+            await self._runs.set_acknowledged(run.run_id, False, {"deferred": "robot offline"})
+            return await self._runs.get(run.run_id) or updated
+
         reply = await self._dispatcher.cancel(run.run_id, run.robot_id, command.mode)
         if reply.applied:
             await self._runs.set_acknowledged(run.run_id, True)
@@ -371,6 +387,38 @@ class RunService(RunManagementUseCase):
             # A PENDING run's robot has not received the goal yet; the reply says nothing about it.
             await self._runs.set_acknowledged(run.run_id, False, {"reason": reply.reason})
         return await self._runs.get(run.run_id) or updated
+
+    async def close(self, command: CloseRunCommand) -> MissionRun:
+        """End a run on the operator's word while its robot cannot answer.
+
+        The robot may still hold the run when it returns; the reconnect reconciliation then sends
+        it a cancel, so closing here never leaves a machine driving unnoticed.
+        """
+        run = await self._target(command.mission_id, command.run_id)
+        target = next_state(run.status, RunTrigger.CLOSE)
+        if not await self._offline(run.robot_id):
+            raise RobotOnline(run.robot_id)
+        closed = await self._runs.update_status(
+            run.run_id,
+            target,
+            expected=run.status,
+            trigger=RunTrigger.CLOSE,
+            detail={"reason": _CLOSED_OFFLINE},
+        )
+        if closed is None:
+            return run
+        await self._finalize(closed, None)
+        emit_run_lifecycle(
+            self._events,
+            run.mission_id,
+            run.run_id,
+            run.robot_id,
+            target,
+            RunTrigger.CLOSE,
+            reason=_CLOSED_OFFLINE,
+        )
+        await self._audit("run.close", "mission", str(run.mission_id), {"run_id": str(run.run_id)})
+        return closed
 
     async def pause(self, command: PauseRunCommand) -> MissionRun:
         return await self._steer(
@@ -415,6 +463,11 @@ class RunService(RunManagementUseCase):
             {"run_id": str(run.run_id), "status": run.status.value, "robot_id": run.robot_id},
         )
 
+    async def _offline(self, robot_id: str) -> bool:
+        """True when the fleet holds the robot and its liveliness token is absent."""
+        robot = await self._robots.get(robot_id)
+        return robot is not None and not robot.online
+
     async def _steer(
         self,
         mission_id: UUID,
@@ -430,6 +483,8 @@ class RunService(RunManagementUseCase):
         """
         run = await self._target(mission_id, run_id)
         target = next_state(run.status, trigger)
+        if await self._offline(run.robot_id):
+            raise RobotOffline(run.robot_id)
         reply = await getattr(self._dispatcher, dispatcher_action)(run.run_id, run.robot_id)
         if reply.applied is None:
             raise RobotUnreachable(run.robot_id, dispatcher_action)
@@ -480,6 +535,9 @@ class RunService(RunManagementUseCase):
 
     async def _finalize(self, run: MissionRun, failure_errors: list[MissionError] | None) -> None:
         await settle_stage_state(self._runs, self._events, run, run.status, failure_errors)
+
+
+_CLOSED_OFFLINE = "closed by the operator while the robot was offline"
 
 
 def _last_header_id(run: MissionRun) -> int:

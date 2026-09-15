@@ -7,6 +7,7 @@ import pytest
 
 from leitstand_backend.application.run_reconciliation import reconcile_robot_runs
 from leitstand_backend.domain.model.mission.mission import NavigationStage
+from leitstand_backend.domain.model.mission.mission_dispatch import CancelMode
 from leitstand_backend.domain.model.mission.mission_run import LastReport, MissionRun, RunOrigin
 from leitstand_backend.domain.model.mission.mission_state import MissionExecStatus
 from leitstand_backend.domain.model.mission.run_lifecycle import RunTrigger
@@ -206,3 +207,58 @@ async def test_a_pending_run_younger_than_the_dispatch_window_is_left_to_the_dis
 
     assert ended == []
     assert (await runs.get(run.run_id)).status is RunStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_a_robot_still_holding_a_run_closed_meanwhile_is_told_to_stop():
+    """The operator closed the run while the robot was away; the machine may still be driving it."""
+    runs, dispatcher, events = (
+        InMemoryMissionRunRepository(),
+        FakeMissionDispatcher(),
+        InMemoryEventPublisher(),
+    )
+    closed = await runs.create(_run(RunStatus.CANCELLED, None))
+
+    ended = await reconcile_robot_runs(
+        runs,
+        dispatcher,
+        events,
+        ROBOT,
+        CONNECTED_AT,
+        claimed_run_id=str(closed.run_id),
+        claim_reported=True,
+    )
+
+    assert ended == []
+    assert [(rid, robot) for rid, robot, _mode in dispatcher.cancelled] == [(closed.run_id, ROBOT)]
+    assert dispatcher.cancelled[0][2] is CancelMode.IMMEDIATE
+
+
+@pytest.mark.asyncio
+async def test_a_claim_naming_nothing_known_sends_no_cancel():
+    runs, dispatcher, events = (
+        InMemoryMissionRunRepository(),
+        FakeMissionDispatcher(),
+        InMemoryEventPublisher(),
+    )
+
+    await reconcile_robot_runs(
+        runs,
+        dispatcher,
+        events,
+        ROBOT,
+        CONNECTED_AT,
+        claimed_run_id="not-a-uuid",
+        claim_reported=True,
+    )
+    await reconcile_robot_runs(
+        runs,
+        dispatcher,
+        events,
+        ROBOT,
+        CONNECTED_AT,
+        claimed_run_id=str(uuid4()),
+        claim_reported=True,
+    )
+
+    assert dispatcher.cancelled == []

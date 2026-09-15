@@ -42,6 +42,7 @@ _READ_TOOLS = frozenset(
         "list_missions",
         "get_mission",
         "get_mission_state",
+        "preview_coverage",
         "list_fields",
         "get_field",
         "list_sites",
@@ -55,6 +56,7 @@ _READ_PATHS = (
     r"^/api/v1/missions/$",
     r"^/api/v1/missions/\{mission_id\}$",
     r"^/api/v1/missions/\{mission_id\}/state$",
+    r"^/api/v1/coverage/preview$",
     r"^/api/v1/fields/$",
     r"^/api/v1/fields/\{field_id\}$",
     r"^/api/v1/sites/$",
@@ -144,9 +146,15 @@ _WHEN_TO_CALL = {
         "Report both as the result gives them."
     ),
     "create_mission": (
-        "Call this only for a mission whose waypoints the operator stated. If they want a field "
-        "covered, call plan_coverage_mission instead: coordinates cannot be derived from a "
-        "boundary here, and guessing them is not a substitute."
+        "Call this for a mission whose waypoints the operator stated, or one that combines such "
+        "stages with a coverage stage. For a field to be covered on its own, call "
+        "plan_coverage_mission instead. Never derive a waypoint from a boundary: a coverage stage "
+        "is the way to work a field, and guessing coordinates is not a substitute."
+    ),
+    "preview_coverage": (
+        "Call this to show what a coverage plan would look like before anything is stored: the "
+        "same inputs as a coverage stage, the same result, nothing written. Report the swath "
+        "count, the covered area and max_excursion_m as it gives them."
     ),
 }
 

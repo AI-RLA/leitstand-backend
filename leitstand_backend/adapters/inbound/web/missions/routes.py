@@ -20,6 +20,7 @@ from leitstand_backend.adapters.inbound.web.missions.dto import (
 from leitstand_backend.adapters.inbound.web.missions.mappers import (
     to_assign_command,
     to_cancel_command,
+    to_close_command,
     to_create_command,
     to_delete_command,
     to_mission_view,
@@ -31,6 +32,7 @@ from leitstand_backend.adapters.inbound.web.missions.mappers import (
     to_unassign_command,
     to_update_command,
 )
+from leitstand_backend.application.coverage_stage_planner import PLANNING_INPUT_ERRORS
 from leitstand_backend.application.run_state_view import RunStateView, build_run_state_view
 from leitstand_backend.domain.errors import (
     AmbiguousRun,
@@ -52,6 +54,8 @@ from leitstand_backend.domain.errors import (
     NoRobotAssigned,
     RobotBusy,
     RobotFactsheetMissing,
+    RobotOffline,
+    RobotOnline,
     RobotPhysicalParametersMissing,
     RobotRefusedControl,
     RobotUnreachable,
@@ -84,12 +88,15 @@ from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRe
 
 router = APIRouter(prefix="/api/v1/missions", tags=["missions"])
 
+# A body naming a field or robot that cannot be planned for is unprocessable, as an unknown site is.
 _AUTHORING_ERRORS = (
     StageNotHomogeneous,
     StageSpansSites,
     UnknownSite,
     DuplicateStageId,
     StageNotInMission,
+    FieldNotFoundError,
+    *PLANNING_INPUT_ERRORS,
 )
 _ROBOT_FIT_ERRORS = (
     StageNotHomogeneous,
@@ -199,13 +206,16 @@ async def create_mission(
     repo: MissionRepository = Depends(get_mission_repository),
     runs: MissionRunRepository = Depends(get_mission_run_repository),
 ) -> MissionView:
-    """Create a mission from a name and an ordered list of navigation stages.
+    """Create a mission from a name and an ordered list of stages.
 
-    Every waypoint must be a coordinate the operator stated. Do not compute one: not from a field
-    or site boundary, not from a robot's current position, and not by converting a distance in
-    metres into degrees. If you were given an area, a row spacing or a bearing rather than
-    coordinates, do not call this: use plan_coverage_mission for a field that should be covered, and
-    otherwise say you cannot work the coordinates out and ask for them.
+    A navigation stage lists waypoints; every one must be a coordinate the operator stated. Do
+    not compute one: not from a field or site boundary, not from a robot's current position, and
+    not by converting a distance in metres into degrees. A coverage stage names a field, the
+    implement's working width and the robot whose factsheet supplies the machine values, and the
+    backend plans its path; for a whole field to be covered, prefer plan_coverage_mission, which
+    takes the same inputs and names the mission after the field. If you were given an area, a row
+    spacing or a bearing rather than coordinates, do not write a navigation stage: say you cannot
+    work the coordinates out and ask for them.
 
     ``stages`` is a list of stage objects, not text containing a list.
 
@@ -216,6 +226,8 @@ async def create_mission(
         mission = await uc.create(to_create_command(body))
     except _AUTHORING_ERRORS as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    except CoveragePlannerUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     return await _view(mission.mission_id, repo, runs)
 
 
@@ -280,8 +292,8 @@ async def update_mission(
     editing the definition never changes what a run did or is doing. Identify the mission by
     mission_id from list_missions. Supplying stages replaces the existing ones; a stage that
     carries its stage_id keeps its identity across the edit, one without gets a new id, and one
-    left out is removed. A planned coverage stage is carried by its stage_id alone; its path
-    cannot be written here, only re-planned.
+    left out is removed. A coverage stage is carried unchanged by its stage_id alone, or
+    re-planned under the same id when its field, width or machine values are given again.
     """
     try:
         mission = await uc.update(to_update_command(mission_id, body))
@@ -291,6 +303,8 @@ async def update_mission(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     except _AUTHORING_ERRORS as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+    except CoveragePlannerUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     return await _view(mission.mission_id, repo, runs)
 
 
@@ -394,7 +408,13 @@ async def dispatch_mission(
         run = await start_uc.start(to_start_run_command(mission_id, body, current_run_origin()))
     except MissionNotFoundError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "mission not found")
-    except (InvalidMissionTransition, RobotBusy, MissionRunInProgress, MissionArchived) as exc:
+    except (
+        InvalidMissionTransition,
+        RobotBusy,
+        RobotOffline,
+        MissionRunInProgress,
+        MissionArchived,
+    ) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
     except (NoRobotAssigned, RobotFactsheetMissing, UnknownSite) as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
@@ -422,6 +442,7 @@ def _steer_errors(exc: Exception) -> HTTPException:
 _STEER_ERRORS = (
     MissionNotFoundError,
     RunNotFoundError,
+    RobotOffline,
     InvalidMissionTransition,
     AmbiguousRun,
     RobotUnreachable,
@@ -446,6 +467,27 @@ async def cancel_mission(
     try:
         run = await uc.cancel(to_cancel_command(mission_id, body))
     except _STEER_ERRORS as exc:
+        raise _steer_errors(exc)
+    return await _view(run.mission_id, repo, runs)
+
+
+@router.post("/{mission_id}/close", response_model=MissionView, operation_id="close_mission_run")
+async def close_mission_run(
+    mission_id: UUID,
+    body: RunSelectBody | None = None,
+    uc: RunManagementUseCase = Depends(get_run_management_use_case),
+    repo: MissionRepository = Depends(get_mission_repository),
+    runs: MissionRunRepository = Depends(get_mission_run_repository),
+) -> MissionView:
+    """End a run whose robot is offline, without the robot's confirmation.
+
+    The run becomes CANCELLED on the operator's word. Refused while the robot is online, where
+    cancel_mission asks the robot and lets it confirm. If the robot later reconnects still holding
+    the run, it is told to cancel. With more than one run active, ``run_id`` says which.
+    """
+    try:
+        run = await uc.close(to_close_command(mission_id, body.run_id if body else None))
+    except (*_STEER_ERRORS, RobotOnline) as exc:
         raise _steer_errors(exc)
     return await _view(run.mission_id, repo, runs)
 

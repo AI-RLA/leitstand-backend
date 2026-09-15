@@ -11,9 +11,9 @@ from leitstand_backend.domain.model.mission.run_status import RunStatus
 class RunTrigger(str, Enum):
     """A lifecycle transition trigger: the named cause of a status change.
 
-    The ``*_REQUEST`` triggers are the operator asking; ``PAUSE``, ``RESUME``, ``ACK``,
-    ``COMPLETE``, ``FAIL`` and ``CANCEL`` are the robot reporting; the rest are the backend
-    settling a reply, a silence or a robot that came back without the run.
+    The ``*_REQUEST`` triggers and ``CLOSE`` are the operator acting; ``PAUSE``, ``RESUME``,
+    ``ACK``, ``COMPLETE``, ``FAIL`` and ``CANCEL`` are the robot reporting; the rest are the
+    backend settling a reply, a silence or a robot that came back without the run.
     """
 
     ACCEPT = "accept"
@@ -24,6 +24,7 @@ class RunTrigger(str, Enum):
     PAUSE_REQUEST = "pause_request"
     RESUME_REQUEST = "resume_request"
     CANCEL_REQUEST = "cancel_request"
+    CLOSE = "close"
     ACK = "ack"
     PAUSE = "pause"
     RESUME = "resume"
@@ -35,7 +36,12 @@ class RunTrigger(str, Enum):
 Actor = Literal["operator", "robot", "backend"]
 
 _OPERATOR_TRIGGERS: Final[frozenset[RunTrigger]] = frozenset(
-    {RunTrigger.PAUSE_REQUEST, RunTrigger.RESUME_REQUEST, RunTrigger.CANCEL_REQUEST}
+    {
+        RunTrigger.PAUSE_REQUEST,
+        RunTrigger.RESUME_REQUEST,
+        RunTrigger.CANCEL_REQUEST,
+        RunTrigger.CLOSE,
+    }
 )
 _BACKEND_TRIGGERS: Final[frozenset[RunTrigger]] = frozenset(
     {
@@ -118,6 +124,13 @@ _PROGRESS_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
 }
 
 
+# An operator closes a run whose robot is offline: no report can end it, and the human knows
+# what the machine cannot say.
+_CLOSE_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
+    (state, RunTrigger.CLOSE): RunStatus.CANCELLED for state in _LIVE_STATES
+}
+
+
 # A robot that came back without a run: the run is closed on the backend's authority.
 _RECONCILE_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
     (RunStatus.CANCELLING, RunTrigger.RECONCILE): RunStatus.CANCELLED,
@@ -149,6 +162,7 @@ ALLOWED_TRANSITIONS: Final[dict[tuple[RunStatus, RunTrigger], RunStatus]] = {
     **_REPLY_TRANSITIONS,
     **_REQUEST_TRANSITIONS,
     **_PROGRESS_TRANSITIONS,
+    **_CLOSE_TRANSITIONS,
     **_RECONCILE_TRANSITIONS,
     **{
         (state, trigger): outcome

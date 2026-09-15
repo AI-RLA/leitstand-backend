@@ -83,6 +83,14 @@ async def test_coverage_planning_is_reachable_and_gated() -> None:
     assert requires_approval("plan_coverage_mission")
 
 
+async def test_a_coverage_preview_is_reachable_and_free_of_approval() -> None:
+    """Planning without storing changes nothing, so the assistant may show one unasked."""
+    exposed = {t.name for t in await _tools()}
+
+    assert "preview_coverage" in exposed
+    assert not requires_approval("preview_coverage")
+
+
 async def test_tool_names_are_operation_ids() -> None:
     """The method-keyed guard matches tools to operations by name, so pin that they correspond.
 

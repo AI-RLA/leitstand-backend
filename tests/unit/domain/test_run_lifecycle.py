@@ -51,6 +51,7 @@ _EXPECTED: dict[tuple[RunStatus, RunTrigger], RunStatus] = {
     (RunStatus.PAUSING, RunTrigger.RESUME_REQUEST): RunStatus.RESUMING,
     (RunStatus.CANCELLING, RunTrigger.RECONCILE): RunStatus.CANCELLED,
     **{(state, RunTrigger.CANCEL_REQUEST): RunStatus.CANCELLING for state in _LIVE},
+    **{(state, RunTrigger.CLOSE): RunStatus.CANCELLED for state in _LIVE},
     **{
         (state, RunTrigger.RECONCILE): RunStatus.FAILED
         for state in _LIVE
@@ -148,6 +149,7 @@ def test_run_trigger_enum_matches_transition_table():
     [
         (RunTrigger.PAUSE_REQUEST, "operator"),
         (RunTrigger.CANCEL_REQUEST, "operator"),
+        (RunTrigger.CLOSE, "operator"),
         (RunTrigger.ACK, "robot"),
         (RunTrigger.COMPLETE, "robot"),
         (RunTrigger.ACCEPT, "backend"),

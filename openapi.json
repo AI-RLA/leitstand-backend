@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Leitstand API",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "paths": {
     "/healthz": {
@@ -405,7 +405,7 @@
           "missions"
         ],
         "summary": "Create Mission",
-        "description": "Create a mission from a name and an ordered list of navigation stages.\n\nEvery waypoint must be a coordinate the operator stated. Do not compute one: not from a field\nor site boundary, not from a robot's current position, and not by converting a distance in\nmetres into degrees. If you were given an area, a row spacing or a bearing rather than\ncoordinates, do not call this: use plan_coverage_mission for a field that should be covered, and\notherwise say you cannot work the coordinates out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is a definition and is not\ndispatched; dispatch_mission runs it, as many times as wanted.",
+        "description": "Create a mission from a name and an ordered list of stages.\n\nA navigation stage lists waypoints; every one must be a coordinate the operator stated. Do\nnot compute one: not from a field or site boundary, not from a robot's current position, and\nnot by converting a distance in metres into degrees. A coverage stage names a field, the\nimplement's working width and the robot whose factsheet supplies the machine values, and the\nbackend plans its path; for a whole field to be covered, prefer plan_coverage_mission, which\ntakes the same inputs and names the mission after the field. If you were given an area, a row\nspacing or a bearing rather than coordinates, do not write a navigation stage: say you cannot\nwork the coordinates out and ask for them.\n\n``stages`` is a list of stage objects, not text containing a list.\n\nThe backend assigns the mission and stage ids. The mission is a definition and is not\ndispatched; dispatch_mission runs it, as many times as wanted.",
         "operationId": "create_mission",
         "requestBody": {
           "required": true,
@@ -489,7 +489,7 @@
           "missions"
         ],
         "summary": "Update Mission",
-        "description": "Change a mission's name, description, or stages.\n\nAllowed at any time, even while a run is active: a run carries its own copy of the plan, so\nediting the definition never changes what a run did or is doing. Identify the mission by\nmission_id from list_missions. Supplying stages replaces the existing ones; a stage that\ncarries its stage_id keeps its identity across the edit, one without gets a new id, and one\nleft out is removed. A planned coverage stage is carried by its stage_id alone; its path\ncannot be written here, only re-planned.",
+        "description": "Change a mission's name, description, or stages.\n\nAllowed at any time, even while a run is active: a run carries its own copy of the plan, so\nediting the definition never changes what a run did or is doing. Identify the mission by\nmission_id from list_missions. Supplying stages replaces the existing ones; a stage that\ncarries its stage_id keeps its identity across the edit, one without gets a new id, and one\nleft out is removed. A coverage stage is carried unchanged by its stage_id alone, or\nre-planned under the same id when its field, width or machine values are given again.",
         "operationId": "update_mission",
         "parameters": [
           {
@@ -922,6 +922,67 @@
         }
       }
     },
+    "/api/v1/missions/{mission_id}/close": {
+      "post": {
+        "tags": [
+          "missions"
+        ],
+        "summary": "Close Mission Run",
+        "description": "End a run whose robot is offline, without the robot's confirmation.\n\nThe run becomes CANCELLED on the operator's word. Refused while the robot is online, where\ncancel_mission asks the robot and lets it confirm. If the robot later reconnects still holding\nthe run, it is told to cancel. With more than one run active, ``run_id`` says which.",
+        "operationId": "close_mission_run",
+        "parameters": [
+          {
+            "name": "mission_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Mission Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RunSelectBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/missions/{mission_id}/pause": {
       "post": {
         "tags": [
@@ -1027,6 +1088,153 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MissionView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/coverage/preview": {
+      "get": {
+        "tags": [
+          "coverage"
+        ],
+        "summary": "Preview Coverage",
+        "description": "Plan a coverage stage for a field and return it without saving anything.\n\nUse it to show the operator what a plan would look like: its swaths, the ground worked and how\nfar the turns leave the field. create_mission with the same inputs stores it.",
+        "operationId": "preview_coverage",
+        "parameters": [
+          {
+            "name": "field_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Field to cover, from list_fields.",
+              "title": "Field Id"
+            },
+            "description": "Field to cover, from list_fields."
+          },
+          {
+            "name": "operation_width_m",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Working width of the mounted implement, in metres.",
+              "title": "Operation Width M"
+            },
+            "description": "Working width of the mounted implement, in metres."
+          },
+          {
+            "name": "params_robot_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Robot whose factsheet supplies the turning radius and track width; omit for values entered by hand.",
+              "title": "Params Robot Id"
+            },
+            "description": "Robot whose factsheet supplies the turning radius and track width; omit for values entered by hand."
+          },
+          {
+            "name": "turning_radius_m",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Minimum turning radius in metres. Required without params_robot_id; with one, it may only widen the robot's own.",
+              "title": "Turning Radius M"
+            },
+            "description": "Minimum turning radius in metres. Required without params_robot_id; with one, it may only widen the robot's own."
+          },
+          {
+            "name": "headland_width_m",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Turning space kept inside the field; the radius when omitted.",
+              "title": "Headland Width M"
+            },
+            "description": "Turning space kept inside the field; the radius when omitted."
+          },
+          {
+            "name": "swath_angle_deg",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "exclusiveMaximum": 180
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Bearing of the swaths; the planner chooses when omitted.",
+              "title": "Swath Angle Deg"
+            },
+            "description": "Bearing of the swaths; the planner chooses when omitted."
+          },
+          {
+            "name": "allow_overlap",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Whether the last pass may overlap the one before it.",
+              "default": false,
+              "title": "Allow Overlap"
+            },
+            "description": "Whether the last pass may overlap the one before it."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoverageStage"
                 }
               }
             }
@@ -1829,9 +2037,32 @@
             "title": "Planner Version"
           },
           "planned_for_robot_id": {
-            "type": "string",
-            "minLength": 1,
-            "title": "Planned For Robot Id"
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned For Robot Id",
+            "description": "Robot whose factsheet supplied the machine values; None when they were entered by hand."
+          },
+          "param_sources": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param Sources",
+            "description": "Where each machine value came from, by parameter name: 'factsheet:<robot_id>', 'manual', 'turning_radius' for a headland defaulted to the radius, or 'planner' for a swath direction the planner chose. Absent on a plan made before it was recorded."
           },
           "planned_at": {
             "type": "string",
@@ -1847,7 +2078,6 @@
           "params",
           "metrics",
           "planner_version",
-          "planned_for_robot_id",
           "planned_at"
         ],
         "title": "CoverageProvenance",
@@ -1918,8 +2148,93 @@
         "title": "CoverageStage",
         "description": "Cover a field by driving its swaths in order, each reached by the turn before it.\n\nProvenance is required, so this stage cannot be written by hand: swaths come from the\nplanner, and the checks that refuse a robot which would cut the corners read the parameters\nthe plan was made with."
       },
-      "CoverageStageRef": {
+      "CoverageStageInput": {
         "properties": {
+          "field_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field Id",
+            "description": "Field to cover, from list_fields."
+          },
+          "operation_width_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Width M",
+            "description": "Working width of the mounted implement, in metres."
+          },
+          "params_robot_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params Robot Id",
+            "description": "Robot whose factsheet supplies the turning radius and track width; omit for values entered by hand."
+          },
+          "turning_radius_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turning Radius M",
+            "description": "Minimum turning radius in metres. Required without params_robot_id; with one, it may only widen the robot's own."
+          },
+          "headland_width_m": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headland Width M",
+            "description": "Turning space kept inside the field; the radius when omitted."
+          },
+          "swath_angle_deg": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMaximum": 180.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Swath Angle Deg",
+            "description": "Bearing of the swaths; the planner chooses when omitted."
+          },
+          "allow_overlap": {
+            "type": "boolean",
+            "title": "Allow Overlap",
+            "description": "Whether the last pass may overlap the one before it.",
+            "default": false
+          },
           "kind": {
             "type": "string",
             "const": "coverage",
@@ -1927,17 +2242,50 @@
             "default": "coverage"
           },
           "stage_id": {
-            "type": "string",
-            "format": "uuid",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Stage Id"
+          },
+          "on_cancel": {
+            "anyOf": [
+              {
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/NavigationStageInput"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CoverageStageInput"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                      "coverage": "#/components/schemas/CoverageStageInput",
+                      "navigation": "#/components/schemas/NavigationStageInput"
+                    }
+                  }
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Cancel",
+            "description": "Cleanup stages executed sequentially when this stage is cancelled. Cleanup stages are themselves non-cancellable."
           }
         },
         "type": "object",
-        "required": [
-          "stage_id"
-        ],
-        "title": "CoverageStageRef",
-        "description": "A coverage stage this mission already has, carried through an edit unchanged.\n\nSwaths are a planner's output, so there is no way to write one here: the stage is named, and\nthe stored segments and provenance are kept as they are. Naming a stage of another mission,\nor one that is not coverage, is refused."
+        "title": "CoverageStageInput",
+        "description": "A coverage stage: carried unchanged when only ``stage_id`` is given, planned otherwise.\n\nThe path is never written here; the backend plans it from the field and the machine values.\n``stage_id`` keeps the stage's identity across a re-plan, so its runs stay comparable."
       },
       "ErrorOrigin": {
         "type": "string",
@@ -2303,13 +2651,13 @@
                   "$ref": "#/components/schemas/NavigationStageInput"
                 },
                 {
-                  "$ref": "#/components/schemas/CoverageStageRef"
+                  "$ref": "#/components/schemas/CoverageStageInput"
                 }
               ],
               "discriminator": {
                 "propertyName": "kind",
                 "mapping": {
-                  "coverage": "#/components/schemas/CoverageStageRef",
+                  "coverage": "#/components/schemas/CoverageStageInput",
                   "navigation": "#/components/schemas/NavigationStageInput"
                 }
               }
@@ -2437,13 +2785,13 @@
                       "$ref": "#/components/schemas/NavigationStageInput"
                     },
                     {
-                      "$ref": "#/components/schemas/CoverageStageRef"
+                      "$ref": "#/components/schemas/CoverageStageInput"
                     }
                   ],
                   "discriminator": {
                     "propertyName": "kind",
                     "mapping": {
-                      "coverage": "#/components/schemas/CoverageStageRef",
+                      "coverage": "#/components/schemas/CoverageStageInput",
                       "navigation": "#/components/schemas/NavigationStageInput"
                     }
                   }
@@ -2715,13 +3063,13 @@
                       "$ref": "#/components/schemas/NavigationStageInput"
                     },
                     {
-                      "$ref": "#/components/schemas/CoverageStageRef"
+                      "$ref": "#/components/schemas/CoverageStageInput"
                     }
                   ],
                   "discriminator": {
                     "propertyName": "kind",
                     "mapping": {
-                      "coverage": "#/components/schemas/CoverageStageRef",
+                      "coverage": "#/components/schemas/CoverageStageInput",
                       "navigation": "#/components/schemas/NavigationStageInput"
                     }
                   }
@@ -3414,6 +3762,7 @@
           "pause_request",
           "resume_request",
           "cancel_request",
+          "close",
           "ack",
           "pause",
           "resume",
@@ -3422,7 +3771,7 @@
           "cancel"
         ],
         "title": "RunTrigger",
-        "description": "A lifecycle transition trigger: the named cause of a status change.\n\nThe ``*_REQUEST`` triggers are the operator asking; ``PAUSE``, ``RESUME``, ``ACK``,\n``COMPLETE``, ``FAIL`` and ``CANCEL`` are the robot reporting; the rest are the backend\nsettling a reply, a silence or a robot that came back without the run."
+        "description": "A lifecycle transition trigger: the named cause of a status change.\n\nThe ``*_REQUEST`` triggers and ``CLOSE`` are the operator acting; ``PAUSE``, ``RESUME``,\n``ACK``, ``COMPLETE``, ``FAIL`` and ``CANCEL`` are the robot reporting; the rest are the\nbackend settling a reply, a silence or a robot that came back without the run."
       },
       "RunView": {
         "properties": {
