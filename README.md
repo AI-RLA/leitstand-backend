@@ -141,6 +141,10 @@ delete any field. Real identity (OIDC) and per-user permissions are not built ye
 
 ## Deployment
 
+The Leitstand is a research prototype. The connection between the backend and the robots is
+neither authenticated nor encrypted, and the operator interface has no user accounts. Run all
+components on a private network or behind a VPN.
+
 ```bash
 cp .env.example .env            # adjust if needed
 cp -r secrets.example secrets   # dev defaults; fill in for a real deployment
@@ -183,7 +187,7 @@ make check         # ruff + format-check + tests
 make openapi       # regenerate openapi.json
 ```
 
-`make ci` mirrors what GitLab CI runs.
+`make ci` mirrors what CI runs (`.github/workflows/ci.yml`).
 
 ### Running the backend natively
 
