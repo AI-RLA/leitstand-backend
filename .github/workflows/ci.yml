@@ -35,3 +35,35 @@ jobs:
         with:
           name: coverage
           path: coverage.xml
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LEITSTAND_TEST_DATABASE_URL: postgresql+asyncpg://leitstand:leitstand@localhost:5432/postgres
+    services:
+      # The image docker-compose.yaml runs, so the migrations are tested against the same PostGIS.
+      postgres:
+        image: postgis/postgis:18-3.6
+        env:
+          POSTGRES_USER: leitstand
+          POSTGRES_PASSWORD: leitstand
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U leitstand"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: |
+          ref=v$(grep -o 'leitstand-robot-contract==[0-9.]*' pyproject.toml | cut -d= -f3)
+          pip install "git+https://github.com/AI-RLA/leitstand-robot-contract.git@${ref}"
+      - run: pip install -e ".[dev]"
+      - run: make check-integration

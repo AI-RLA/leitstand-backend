@@ -23,7 +23,7 @@ check: ruff format-check test
 test:
 	$(PYTEST)
 
-# Creates, migrates and drops its own database on a development Postgres, never a production one.
+# Creates and drops its own database, so run it against a development Postgres only.
 check-integration:
 	$(PYTEST) -m integration
 
