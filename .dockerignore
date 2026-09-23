@@ -1,6 +1,6 @@
 .git/
 .gitignore
-.gitlab-ci.yml
+.github/
 .pre-commit-config.yaml
 .vscode/
 .omc/
