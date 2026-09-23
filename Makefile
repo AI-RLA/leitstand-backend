@@ -1,4 +1,4 @@
-.PHONY: dev-install dev-run check test format ruff format-check pytest-cov \
+.PHONY: dev-install dev-run check check-integration test format ruff format-check pytest-cov \
         openapi openapi-check ci migrate migrate-revision
 
 PYTHON ?= .venv/bin/python
@@ -22,6 +22,10 @@ check: ruff format-check test
 
 test:
 	$(PYTEST)
+
+# Creates, migrates and drops its own database on a development Postgres, never a production one.
+check-integration:
+	$(PYTEST) -m integration
 
 format:
 	$(PYTHON) -m ruff check --fix .

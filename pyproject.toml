@@ -78,6 +78,6 @@ python_classes = "Test*"
 python_functions = "test_*"
 addopts = "--tb=short -m 'not integration'"
 markers = [
-    "integration: needs a live Postgres at LEITSTAND_DATABASE_URL, migrated to head",
+    "integration: needs a Postgres server at LEITSTAND_TEST_DATABASE_URL whose login may create databases",
 ]
 pythonpath = [".", "tests"]
