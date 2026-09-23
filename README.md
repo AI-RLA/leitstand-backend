@@ -184,10 +184,15 @@ backend, and the Docker build reads it via `additional_contexts`.
 python3 -m venv .venv
 make dev-install   # editable contract, then the backend + dev deps
 make check         # ruff + format-check + tests
+make check-integration   # integration tests against the compose Postgres
 make openapi       # regenerate openapi.json
 ```
 
 `make ci` mirrors what CI runs (`.github/workflows/ci.yml`).
+
+The integration tests create, migrate and drop their own database on the Postgres server in
+`LEITSTAND_TEST_DATABASE_URL`, by default the compose one. Its login must be allowed to create
+databases, so point it at a development server, never at production.
 
 ### Running the backend natively
 
