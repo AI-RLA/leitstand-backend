@@ -223,10 +223,11 @@ def _provenance_of(context: MiddlewareContext) -> ToolCallProvenance:
     Anything absent or malformed yields no approval, so a call that arrives without a decision
     behind it is audited as autonomous rather than inheriting someone else's approver.
     """
-    # Both reads stay guarded: request_context is None until the session opens, and the envelope
-    # is an extra field on meta rather than a declared one.
+    # Both reads stay guarded: request_context is None until the session opens, and meta is None
+    # for a call that sent no metadata.
     request_context = getattr(context.fastmcp_context, "request_context", None)
-    envelope = getattr(getattr(request_context, "meta", None), CALL_PROVENANCE_KEY, None)
+    meta = getattr(request_context, "meta", None)
+    envelope = meta.get(CALL_PROVENANCE_KEY) if isinstance(meta, dict) else None
     if not isinstance(envelope, dict):
         return ToolCallProvenance()
     return ToolCallProvenance(

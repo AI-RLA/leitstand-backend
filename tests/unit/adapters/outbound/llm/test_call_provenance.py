@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastmcp import Client
 from pydantic_ai import DeferredToolRequests, DeferredToolResults
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -120,6 +121,22 @@ def _approve(requests: DeferredToolRequests, approvers: dict[str, str]) -> Defer
             "decision_id": str(uuid4()),
         }
     return DeferredToolResults(approvals=approvals, metadata=metadata)
+
+
+async def test_a_call_without_metadata_is_audited_as_unapproved() -> None:
+    """A call that carries no envelope at all must not be read as approved."""
+    session = _CapturingSession()
+    domain_mcp, loopback = build_domain_mcp(_probe_app(session), _ORIGIN)
+
+    try:
+        async with Client(domain_mcp) as client:
+            await client.call_tool("dispatch_mission", {"mission_id": "m-1"})
+    finally:
+        await loopback.aclose()
+
+    row = _rows_by_target(session)["m-1"]
+    assert row.authority == AUTHORITY_AUTONOMOUS
+    assert row.decided_by is None
 
 
 def _rows_by_target(session: _CapturingSession) -> dict[str | None, Any]:
