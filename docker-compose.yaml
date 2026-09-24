@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
 
   zenoh-router:
-    image: eclipse/zenoh:1.9.0
+    image: eclipse/zenoh:1.10.1
     command: ["-c", "/etc/zenoh/router.json5"]
     volumes:
       - ./config/zenoh_router.json5:/etc/zenoh/router.json5:ro
