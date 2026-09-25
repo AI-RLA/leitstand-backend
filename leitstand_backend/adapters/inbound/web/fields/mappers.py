@@ -34,6 +34,8 @@ def to_field_view(field: Field) -> FieldView:
         name=field.name,
         geometry=field.geometry,
         area_ha=field.area_ha,
+        center_lat=field.center_lat,
+        center_lon=field.center_lon,
         notes=field.notes,
         created_at=field.created_at,
         updated_at=field.updated_at,

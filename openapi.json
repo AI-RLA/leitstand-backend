@@ -2415,6 +2415,30 @@
             ],
             "title": "Area Ha"
           },
+          "center_lat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Center Lat",
+            "description": "Degrees latitude, WGS84, of a point guaranteed to lie inside the field, not its centroid. Null for a polygon with no ring."
+          },
+          "center_lon": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Center Lon",
+            "description": "Degrees longitude, WGS84, of a point guaranteed to lie inside the field, not its centroid. Null for a polygon with no ring."
+          },
           "notes": {
             "anyOf": [
               {
@@ -2443,6 +2467,8 @@
           "name",
           "geometry",
           "area_ha",
+          "center_lat",
+          "center_lon",
           "notes",
           "created_at",
           "updated_at"

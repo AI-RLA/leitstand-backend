@@ -116,9 +116,10 @@ _WHEN_TO_CALL = {
         "or why it failed. Progress changes continuously, so never answer it from memory."
     ),
     "list_fields": (
-        "Call this for any question about which fields exist. The list may legitimately be empty."
+        "Call this for any question about which fields exist, and for a field's center point. "
+        "The list may legitimately be empty."
     ),
-    "get_field": "Call this for one field's boundary and area, given its id.",
+    "get_field": "Call this for one field's boundary, area and center point, given its id.",
     "list_sites": (
         "Call this for any question about which sites exist. The list may legitimately be empty."
     ),
