@@ -127,6 +127,8 @@ bare-value file per secret under `secrets/` (`/run/secrets` in Docker), in that 
 | `LEITSTAND_LLM_REASONING` | `off` | `off` disables the model's chain of thought |
 | `LEITSTAND_CHAT_ENABLED` | `true` | expose `POST /api/v1/chat` |
 | `LEITSTAND_CHAT_MAX_TOOL_CALLS` | `10` | max tool calls per turn |
+| `LEITSTAND_MCP_SERVERS_FILE` | unset | external MCP servers for the AI assistant, see below. Unset means none |
+| `LEITSTAND_CHAT_TIMEZONE` | `Europe/Berlin` | the operators' time zone, in which the AI assistant is told today's date |
 | `LEITSTAND_COVERAGE_PLANNER_URL` | unset | coverage planner service; unset means coverage planning answers 503 |
 | `LEITSTAND_COVERAGE_PLANNER_CONNECT_TIMEOUT_S` | `3` | connect timeout |
 | `LEITSTAND_COVERAGE_PLANNER_READ_TIMEOUT_S` | `60` | read timeout |
@@ -152,9 +154,9 @@ docker compose up -d --build
 cd ../leitstand-frontend && docker compose up -d --build   # UI at http://<host>/
 ```
 
-Starts Postgres, the Zenoh router, the coverage planner and the backend. Zenoh router at
-`tcp/<host>:7447`; the API is on `127.0.0.1:8080` only (`BACKEND_BIND_ADDR` in `.env` widens
-it), the frontend stack reaches it over the shared `leitstand` network. Stop with
+Starts Postgres, the Zenoh router, the coverage planner, the weather MCP server and the backend.
+Zenoh router at `tcp/<host>:7447`. The API is on `127.0.0.1:8080` only (`BACKEND_BIND_ADDR` in
+`.env` widens it), and the frontend stack reaches it over the shared `leitstand` network. Stop with
 `docker compose down` (`down -v` also deletes the database).
 
 `secrets/` holds one bare-value file per credential, mounted into the containers and never
@@ -173,6 +175,36 @@ directory; on an existing volume run `ALTER USER leitstand PASSWORD '<new>'` via
 
 For active Python development on the backend, see Development
 below.
+
+### External MCP servers
+
+The AI assistant can also use tools of other MCP servers, listed in `config/mcp_servers.json` in
+the usual `mcpServers` format plus one key of our own, `allowed_tools`. How to write and add a
+server: [`mcp-servers/README.md`](mcp-servers/README.md).
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "url": "${MCP_WEATHER_URL:-http://mcp-weather:8091/mcp}",
+      "allowed_tools": ["current_weather", "daily_forecast", "hourly_forecast", "search_places"]
+    }
+  }
+}
+```
+
+| Key | Description |
+|---|---|
+| `<name>` | Server name. The AI assistant sees each tool as `<name>_<tool>`, for example `weather_daily_forecast`. Lower-case letters and digits, at most 24 characters, not starting with `leitstand`. |
+| `url` | Streamable HTTP endpoint. |
+| `allowed_tools` | Names of the server's tools the AI assistant may use, without the prefix. Tools not listed are not offered. Each name at most 39 characters, 64 including the prefix. |
+| `timeout` | Timeout per call in milliseconds. Default 10000. |
+| `headers` | HTTP headers sent with each request. |
+
+- Only tools the server marks read-only are offered, because they run without the operator's
+  approval. A server's texts reach the model unchanged, so configure only servers you trust.
+- An invalid entry is skipped with a log line (`external_mcp_entry_invalid`). While a server is
+  down, the AI assistant answers without its tools.
 
 ## Development
 

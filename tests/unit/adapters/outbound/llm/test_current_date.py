@@ -1,0 +1,51 @@
+"""The model cannot know the date, and "tomorrow" or "on Friday" are wrong without it."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import pytest
+from pydantic import ValidationError
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+from leitstand_backend.adapters.outbound.llm.agent_factory import build_chat_agent
+from leitstand_backend.adapters.outbound.llm.domain_mcp import build_domain_mcp
+from leitstand_backend.infrastructure.factory import create_app
+from leitstand_backend.infrastructure.provenance import AgentOrigin
+from leitstand_backend.infrastructure.settings import Settings
+
+
+async def _instructions_for(zone: str) -> str:
+    settings = Settings(zenoh_disabled=True, auto_migrate=False, chat_timezone=zone)
+    domain_mcp, loopback = build_domain_mcp(create_app(settings), AgentOrigin())
+    agent = build_chat_agent(settings, domain_mcp)
+    seen: list[str] = []
+
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.append(info.instructions or "")
+        return ModelResponse(parts=[TextPart("ok")])
+
+    try:
+        with agent.override(model=FunctionModel(model)):
+            await agent.run("hi")
+    finally:
+        await loopback.aclose()
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_told_the_date_in_the_operators_zone() -> None:
+    """At any hour, one of these two zones is on a different date than UTC, so a UTC date fails."""
+    for zone in ("Pacific/Kiritimati", "Pacific/Pago_Pago"):
+        local = datetime.now(ZoneInfo(zone))
+
+        instructions = await _instructions_for(zone)
+
+        assert f"Today is {local:%A, %d %B %Y} ({zone})." in instructions
+
+
+def test_an_unknown_timezone_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        Settings(zenoh_disabled=True, auto_migrate=False, chat_timezone="Mars/Olympus")

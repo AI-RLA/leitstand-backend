@@ -151,29 +151,30 @@ def _has_tool_return(messages: list[ModelMessage]) -> bool:
     )
 
 
-async def test_the_rebuild_carries_the_configuration() -> None:
-    """The toolset rebuilds per run and drops whatever the rebuild does not copy.
+async def test_the_rebuild_keeps_the_constructor_options() -> None:
+    """The toolset rebuilds per run from what it was constructed with, every option included.
 
-    Losing a field raises nothing; only the audit row is poorer. Every field is asserted because
-    the rebuild is an allowlist, so one added upstream is absent until someone adds it here too.
+    Losing an option raises nothing, only the audit row is poorer, so each one is asserted.
     """
     domain_mcp, loopback = build_domain_mcp(_probe_app(_CapturingSession()), _ORIGIN)
-    toolset = _RunScopedMCPToolset(domain_mcp, process_tool_call=_forward_call_provenance)
-    toolset.tool_error_behavior = "raise"
-    toolset.max_retries = 3
-    toolset.cache_tools = True
-    toolset.cache_resources = True
-    toolset.cache_prompts = True
+    toolset = _RunScopedMCPToolset(
+        domain_mcp,
+        process_tool_call=_forward_call_provenance,
+        max_retries=3,
+        tool_error_behavior="failed",
+        include_instructions=True,
+    )
 
     try:
         fresh = await toolset.for_run(None)
     finally:
         await loopback.aclose()
 
+    assert fresh is not toolset
     assert fresh.process_tool_call is _forward_call_provenance
-    assert fresh.tool_error_behavior == "raise"
     assert fresh.max_retries == 3
-    assert (fresh.cache_tools, fresh.cache_resources, fresh.cache_prompts) == (True, True, True)
+    assert fresh.tool_error_behavior == "failed"
+    assert fresh.include_instructions is True
 
 
 async def test_two_approvals_get_separate_decisions() -> None:
