@@ -139,6 +139,8 @@ def shape_forecast(body: dict[str, Any], block: Block) -> dict[str, Any]:
     data = body[block]
     units = body[f"{block}_units"]
     shaped: dict[str, Any] = {
+        # In every result, since the model loses a note that sits only in the server instructions.
+        "basis": "Weather model estimate for the grid cell around grid_point, not a measurement.",
         "grid_point": {"lat": body["latitude"], "lon": body["longitude"]},
         "timezone": body["timezone"],
         "time": _column(data["time"], block),

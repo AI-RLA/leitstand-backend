@@ -1,4 +1,4 @@
-"""The model cannot know the date, and "tomorrow" or "on Friday" are wrong without it."""
+"""The model cannot know the date or hour, and "tomorrow" or "last night" are wrong without them."""
 
 from __future__ import annotations
 
@@ -35,15 +35,21 @@ async def _instructions_for(zone: str) -> str:
     return seen[0]
 
 
+def _line(zone: str, moment: datetime) -> str:
+    hours = f"between {moment:%H}:00 and {moment.hour + 1:02d}:00"
+    return f"It is {moment:%A, %d %B %Y}, {hours} ({zone})."
+
+
 @pytest.mark.asyncio
-async def test_the_model_is_told_the_date_in_the_operators_zone() -> None:
+async def test_the_model_is_told_the_date_and_hour_in_the_operators_zone() -> None:
     """At any hour, one of these two zones is on a different date than UTC, so a UTC date fails."""
     for zone in ("Pacific/Kiritimati", "Pacific/Pago_Pago"):
-        local = datetime.now(ZoneInfo(zone))
-
+        before = datetime.now(ZoneInfo(zone))
         instructions = await _instructions_for(zone)
+        after = datetime.now(ZoneInfo(zone))
 
-        assert f"Today is {local:%A, %d %B %Y} ({zone})." in instructions
+        # Either side of a full hour, in case one passes while the turn runs.
+        assert _line(zone, before) in instructions or _line(zone, after) in instructions
 
 
 def test_an_unknown_timezone_is_refused() -> None:

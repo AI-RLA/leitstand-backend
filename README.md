@@ -128,7 +128,7 @@ bare-value file per secret under `secrets/` (`/run/secrets` in Docker), in that 
 | `LEITSTAND_CHAT_ENABLED` | `true` | expose `POST /api/v1/chat` |
 | `LEITSTAND_CHAT_MAX_TOOL_CALLS` | `10` | max tool calls per turn |
 | `LEITSTAND_MCP_SERVERS_FILE` | unset | external MCP servers for the AI assistant, see below. Unset means none |
-| `LEITSTAND_CHAT_TIMEZONE` | `Europe/Berlin` | the operators' time zone, in which the AI assistant is told today's date |
+| `LEITSTAND_CHAT_TIMEZONE` | `Europe/Berlin` | the operators' time zone, in which the AI assistant is told the date and hour |
 | `LEITSTAND_COVERAGE_PLANNER_URL` | unset | coverage planner service; unset means coverage planning answers 503 |
 | `LEITSTAND_COVERAGE_PLANNER_CONNECT_TIMEOUT_S` | `3` | connect timeout |
 | `LEITSTAND_COVERAGE_PLANNER_READ_TIMEOUT_S` | `60` | read timeout |

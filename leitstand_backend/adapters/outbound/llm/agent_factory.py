@@ -56,9 +56,6 @@ SYSTEM_PROMPT = (
 # of an answer.
 ChatAgent = Agent[object, str | DeferredToolRequests]
 
-# How long a turn waits for an external server to connect before it goes on without its tools.
-_CONNECT_TIMEOUT_S = 3
-
 
 @cache
 def system_prompt_version() -> str:
@@ -188,7 +185,8 @@ def _external_toolset(name: str, server: ExternalMCPServer) -> AbstractToolset[A
         server.url,
         headers=server.headers,
         read_timeout=server.timeout / 1000,
-        init_timeout=_CONNECT_TIMEOUT_S,
+        # Seconds a turn waits for the server to connect before it goes on without its tools.
+        init_timeout=3,
         tool_error_behavior="failed",
         include_instructions=True,
     )
@@ -226,14 +224,17 @@ def build_chat_agent(
     )
 
     @agent.instructions
-    def current_date() -> str:
-        """Tell the model the operators' date, which it cannot know itself.
+    def current_time() -> str:
+        """Tell the model the operators' date and hour, which it cannot know itself.
 
-        The date, not the time: instructions come before the conversation, so a line that changed
+        The hour, not the minute: instructions come before the conversation, so a line that changed
         every minute would make the model provider's prompt cache miss on almost every turn.
         """
         zone = settings.chat_timezone
-        return f"Today is {datetime.now(zone):%A, %d %B %Y} ({zone.key})."
+        now = datetime.now(zone)
+        return (
+            f"It is {now:%A, %d %B %Y}, between {now:%H}:00 and {now.hour + 1:02d}:00 ({zone.key})."
+        )
 
     return agent
 

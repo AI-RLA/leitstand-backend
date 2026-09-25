@@ -7,13 +7,14 @@ MCP Streamable HTTP.
 |---|---|
 | `current_weather` | the weather now |
 | `daily_forecast` | one row per day, day 1 is today, up to 16 days |
-| `hourly_forecast` | one row per hour, up to 48 hours ahead and 48 hours back, with a choice of values including soil moisture and soil temperature |
+| `hourly_forecast` | one row per hour for a period of up to 72 hours, past or future, given as local start and end hours, with a choice of values including soil moisture and soil temperature |
 | `search_places` | up to five places with a given name and their coordinates, optionally within one country, for a weather lookup by place name |
 
 Every result has the same compact shape: `time` and one list per value in `values`, their `units`,
-the weather in words (`weather`), the model grid point Open-Meteo used (`grid_point`) and the
-`source`. Coordinates are rounded to two decimals, about one kilometre, before they leave the
-server. The values are a weather model's estimate for a grid cell, not a measurement at the point.
+the weather in words (`weather`), the model grid point Open-Meteo used (`grid_point`), the `source`,
+and `basis`, which states that the values are a weather model's estimate for that grid cell, not a
+measurement at the point. Coordinates are rounded to two decimals, about one kilometre, before they
+leave the server.
 
 ## Usage
 

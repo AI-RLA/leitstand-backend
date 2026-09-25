@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Annotated, Any
 
@@ -27,12 +28,8 @@ INSTRUCTIONS = (
 _WEATHER_SOURCE = {
     "source": {"title": open_meteo.WEATHER_SOURCE_TITLE, "url": open_meteo.WEATHER_SOURCE_URL}
 }
-_PLACES_SOURCE = {
-    "source": {"title": open_meteo.PLACES_SOURCE_TITLE, "url": open_meteo.PLACES_SOURCE_URL}
-}
 # Every tool only reads, so a client may run it without asking the user.
 _READ_ONLY = {"readOnlyHint": True}
-_MAX_PLACES = 5
 
 Latitude = Annotated[
     float, Field(ge=-90, le=90, description="Latitude of the point, WGS84 degrees.")
@@ -111,17 +108,14 @@ def create_server(*, forecast_url: str, geocoding_url: str, language: str) -> Fa
         latitude: Latitude,
         longitude: Longitude,
         ctx: Context,
-        hours: Annotated[
-            int,
-            Field(
-                ge=1,
-                le=48,
-                description="Hours from the current hour on, the current hour included.",
-            ),
-        ] = 24,
-        past_hours: Annotated[
-            int, Field(ge=0, le=48, description="Hours before the current hour.")
-        ] = 0,
+        start: datetime | None = Field(
+            default=None,
+            description="First hour of the period, local time at the point, e.g. 2026-09-24T22:00.",
+        ),
+        end: datetime | None = Field(
+            default=None,
+            description="Last hour of the period, included, e.g. 2026-09-25T06:00.",
+        ),
         variables: Annotated[
             tuple[open_meteo.HourlyVariable, ...],
             Field(
@@ -131,25 +125,38 @@ def create_server(*, forecast_url: str, geocoding_url: str, language: str) -> Fa
             ),
         ] = open_meteo.DEFAULT_HOURLY_VARIABLES,
     ) -> dict:
-        """Hour by hour weather at a point, up to 48 hours ahead and 48 hours back.
+        """Hour by hour weather at a point for a period of up to 72 hours, past or future.
 
         Use it for timing within a day, such as when rain starts or stops, for rain overnight, and
         for soil moisture, soil temperature and evapotranspiration, which only this tool returns.
-        Choose the values with variables. Without a choice it returns temperature, precipitation,
-        wind and gusts.
+        Give the period as start and end in local time at the point, for example 22:00 yesterday to
+        06:00 today for last night, at most about three months back. Without a period it returns the
+        next 24 hours. Choose the values with variables. Without a choice it returns temperature,
+        precipitation, wind and gusts.
         """
-        query = open_meteo.forecast_params(
-            latitude,
-            longitude,
-            hourly=variables,
-            forecast_hours=hours,
-            past_hours=past_hours,
-        )
+        if (start is None) != (end is None):
+            raise ToolError("Give both start and end, or neither.")
+        if start is None or end is None:
+            period: dict[str, str | int] = {"forecast_hours": 24}
+        else:
+            if start.tzinfo or end.tzinfo:
+                raise ToolError("Give start and end in local time at the point, without an offset.")
+            length = end - start
+            # Long enough for a night and the day around it, short enough to keep the answer small.
+            if not timedelta(0) <= length <= timedelta(hours=72):
+                raise ToolError("end must be after start, and the period at most 72 hours long.")
+            period = {"start_hour": f"{start:%Y-%m-%dT%H}:00", "end_hour": f"{end:%Y-%m-%dT%H}:00"}
+        query = open_meteo.forecast_params(latitude, longitude, hourly=variables, **period)
         return await fetch_and_shape(
             ctx, forecast_url, query, partial(open_meteo.shape_forecast, block="hourly")
         )
 
-    @mcp.tool(meta=_PLACES_SOURCE, annotations=_READ_ONLY)
+    @mcp.tool(
+        meta={
+            "source": {"title": open_meteo.PLACES_SOURCE_TITLE, "url": open_meteo.PLACES_SOURCE_URL}
+        },
+        annotations=_READ_ONLY,
+    )
     async def search_places(
         name: Annotated[
             str, Field(min_length=2, max_length=100, description="A town, village or region name.")
@@ -169,7 +176,7 @@ def create_server(*, forecast_url: str, geocoding_url: str, language: str) -> Fa
         a weather tool. When more than one place could be meant, ask the user which one before
         using its coordinates. It does not find street addresses.
         """
-        query = {"name": name, "count": str(_MAX_PLACES), "language": language, "format": "json"}
+        query = {"name": name, "count": "5", "language": language, "format": "json"}
         if country_code:
             query["countryCode"] = country_code
         return await fetch_and_shape(ctx, geocoding_url, query, open_meteo.shape_places)

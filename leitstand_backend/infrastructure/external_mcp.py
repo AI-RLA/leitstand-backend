@@ -15,17 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = structlog.get_logger(__name__)
 
-# OpenAI and Gemini accept at most 64 characters per tool name, the server's prefix included.
-_MAX_PREFIXED_NAME = 64
 _MAX_SERVER_NAME = 24
-_MAX_TOOL_NAME = _MAX_PREFIXED_NAME - _MAX_SERVER_NAME - len("_")
-
-# No underscore in a server name, so a prefixed tool name cannot collide with another server's.
-_SERVER_NAME = re.compile(r"[a-z][a-z0-9]*")
-_TOOL_NAME = r"^[a-zA-Z0-9_-]+$"
-
-# ${VAR}, or ${VAR:-default} for an unset or empty VAR, as in other mcpServers files.
-_ENV_VARIABLE = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
 
 
 class ExternalMCPServer(BaseModel):
@@ -37,7 +27,9 @@ class ExternalMCPServer(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     timeout: int = Field(default=10_000, gt=0, le=60_000, description="Milliseconds per call.")
     allowed_tools: tuple[
-        Annotated[str, Field(pattern=_TOOL_NAME, max_length=_MAX_TOOL_NAME)], ...
+        # OpenAI and Gemini accept at most 64 characters per tool name, prefix included.
+        Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]+$", max_length=64 - _MAX_SERVER_NAME - 1)],
+        ...,
     ] = Field(min_length=1)
 
     @field_validator("url")
@@ -66,7 +58,8 @@ def load_external_servers(path: Path | None, reserved_prefix: str) -> dict[str, 
 
     loaded: dict[str, ExternalMCPServer] = {}
     for name, entry in servers.items():
-        valid = _SERVER_NAME.fullmatch(name) and len(name) <= _MAX_SERVER_NAME
+        # No underscore, so a prefixed tool name cannot collide with another server's.
+        valid = re.fullmatch(r"[a-z][a-z0-9]*", name) and len(name) <= _MAX_SERVER_NAME
         if not valid or name.startswith(reserved_prefix):
             logger.warning(
                 "external_mcp_entry_invalid",
@@ -85,7 +78,9 @@ def load_external_servers(path: Path | None, reserved_prefix: str) -> dict[str, 
 def _expand_env_vars(value: Any) -> Any:
     """Fill in the environment variables referenced in every string of an entry."""
     if isinstance(value, str):
-        return _ENV_VARIABLE.sub(_env_value, value)
+        # ${VAR}, or ${VAR:-default} for an unset or empty VAR, as in other mcpServers files.
+        variable = r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}"
+        return re.sub(variable, _env_value, value)
     if isinstance(value, dict):
         return {key: _expand_env_vars(item) for key, item in value.items()}
     if isinstance(value, list):

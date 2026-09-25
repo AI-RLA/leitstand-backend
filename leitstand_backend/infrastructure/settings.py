@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     chat_max_tool_calls: int = Field(default=10)
     # External MCP servers the AI assistant may use. Unset means none.
     mcp_servers_file: Path | None = Field(default=None)
-    # The operators' time zone, in which the AI assistant is told today's date.
+    # The operators' time zone, in which the AI assistant is told the date and hour.
     chat_timezone: ZoneInfo = Field(default=ZoneInfo("Europe/Berlin"))
 
     # Auth. Null token = dev-open; a set token is required on REST and the WS endpoint.
