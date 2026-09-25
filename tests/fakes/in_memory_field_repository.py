@@ -32,12 +32,15 @@ class InMemoryFieldRepository(FieldRepository):
         notes: str | None,
     ) -> Field:
         area = _polygon_area_ha(geometry)
+        center_lat, center_lon = _vertex_mean(geometry)
         now = datetime.now(timezone.utc)
         field = Field(
             id=uuid4(),
             name=name,
             geometry=geometry,
             area_ha=area,
+            center_lat=center_lat,
+            center_lon=center_lon,
             notes=notes,
             created_at=now,
             updated_at=now,
@@ -57,12 +60,16 @@ class InMemoryFieldRepository(FieldRepository):
             current = self._fields.get(field_id)
             if current is None:
                 return None
+            new_geometry = geometry if geometry is not None else current.geometry
+            center_lat, center_lon = _vertex_mean(new_geometry)
             updated = current.model_copy(
                 update={
                     "name": name if name is not None else current.name,
-                    "geometry": geometry if geometry is not None else current.geometry,
+                    "geometry": new_geometry,
+                    "center_lat": center_lat,
+                    "center_lon": center_lon,
                     "notes": notes if notes is not None else current.notes,
-                    "area_ha": _polygon_area_ha(geometry) if geometry else current.area_ha,
+                    "area_ha": _polygon_area_ha(new_geometry),
                     "updated_at": datetime.now(timezone.utc),
                 }
             )
@@ -83,6 +90,17 @@ class InMemoryFieldRepository(FieldRepository):
         """
         with self._lock:
             self._fields[field.id] = field
+
+
+def _vertex_mean(geometry: Polygon) -> tuple[float | None, float | None]:
+    """Approximate the center by the outer ring's vertex mean, where PostGIS picks a point inside."""
+    if not geometry.coordinates:
+        return None, None
+    ring = geometry.coordinates[0][:-1]
+    return (
+        sum(position[1] for position in ring) / len(ring),
+        sum(position[0] for position in ring) / len(ring),
+    )
 
 
 def _polygon_area_ha(geometry: Polygon) -> float:
