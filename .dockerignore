@@ -24,5 +24,6 @@ CLAUDE.md
 .env
 .env.local
 secrets/
+mcp-servers/
 *.log
 .claude/

@@ -15,7 +15,10 @@ dev-run:
 	-docker compose stop backend 2>/dev/null
 	docker compose up -d --wait postgres zenoh-router
 	-docker compose up -d --build coverage-planner
+	-docker compose up -d --build mcp-weather
 	LEITSTAND_COVERAGE_PLANNER_URL=$${LEITSTAND_COVERAGE_PLANNER_URL:-http://localhost:8090} \
+	LEITSTAND_MCP_SERVERS_FILE=$${LEITSTAND_MCP_SERVERS_FILE:-config/mcp_servers.json} \
+	MCP_WEATHER_URL=$${MCP_WEATHER_URL:-http://127.0.0.1:8091/mcp} \
 	    $(PYTHON) -m leitstand_backend
 
 check: ruff format-check test

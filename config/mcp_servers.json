@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "weather": {
+      "url": "${MCP_WEATHER_URL:-http://mcp-weather:8091/mcp}",
+      "allowed_tools": ["current_weather", "daily_forecast", "hourly_forecast", "search_places"]
+    }
+  }
+}

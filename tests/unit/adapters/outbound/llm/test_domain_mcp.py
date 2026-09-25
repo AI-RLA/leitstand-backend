@@ -6,10 +6,13 @@ rename drops a tool, or a new write route reaches the model ungated.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastmcp import Client
 
 from leitstand_backend.adapters.outbound.llm.domain_mcp import (
+    DOMAIN_TOOL_PREFIX,
     build_domain_mcp,
     requires_approval,
 )
@@ -136,3 +139,10 @@ async def test_run_routes_are_exposed_exactly_as_intended() -> None:
     assert "delete_run" not in names
     assert "reset_mission" not in names
     assert "list_mission_runs" not in names and "get_run" not in names
+
+
+async def test_every_tool_name_fits_the_strictest_model_provider() -> None:
+    """OpenAI and Gemini accept at most 64 letters, digits, underscores and hyphens per tool name."""
+    names = [f"{DOMAIN_TOOL_PREFIX}_{tool.name}" for tool in await _tools()]
+
+    assert names and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", name) for name in names)

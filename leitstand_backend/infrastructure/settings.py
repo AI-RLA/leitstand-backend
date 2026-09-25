@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -71,6 +72,10 @@ class Settings(BaseSettings):
     # Bounds a turn that will not converge: asked something it cannot work out, the model calls
     # tools in a cycle until something stops it.
     chat_max_tool_calls: int = Field(default=10)
+    # External MCP servers the AI assistant may use. Unset means none.
+    mcp_servers_file: Path | None = Field(default=None)
+    # The operators' time zone, in which the AI assistant is told the date and hour.
+    chat_timezone: ZoneInfo = Field(default=ZoneInfo("Europe/Berlin"))
 
     # Auth. Null token = dev-open; a set token is required on REST and the WS endpoint.
     auth_bearer_token: SecretStr | None = Field(default=None)

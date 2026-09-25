@@ -46,6 +46,21 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  mcp-weather:
+    build:
+      context: ./mcp-servers/weather
+    image: leitstand-mcp-weather:local
+    ports:
+      - "127.0.0.1:8091:8091"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -64,6 +79,9 @@ services:
       LEITSTAND_ZENOH_ENDPOINT: tcp/zenoh-router:7447
       LEITSTAND_AUTO_MIGRATE: "true"
       LEITSTAND_COVERAGE_PLANNER_URL: http://coverage-planner:8090
+      LEITSTAND_MCP_SERVERS_FILE: /app/config/mcp_servers.json
+    volumes:
+      - ./config/mcp_servers.json:/app/config/mcp_servers.json:ro
     secrets:
       - leitstand_llm_api_key
       - leitstand_auth_bearer_token
@@ -77,8 +95,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # No dependency on the planner: a planner that is down or still building must cost coverage
-    # planning and nothing else.
+    # No dependency on the planner or the MCP servers: one that is down or still building must cost
+    # its own feature and nothing else.
     depends_on:
       postgres:
         condition: service_healthy
