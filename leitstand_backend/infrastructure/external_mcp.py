@@ -28,7 +28,7 @@ class ExternalMCPServer(BaseModel):
     timeout: int = Field(default=10_000, gt=0, le=60_000, description="Milliseconds per call.")
     allowed_tools: tuple[
         # OpenAI and Gemini accept at most 64 characters per tool name, prefix included.
-        Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]+$", max_length=64 - _MAX_SERVER_NAME - 1)],
+        Annotated[str, Field(pattern=r"^[a-zA-Z0-9_*-]+$", max_length=64 - _MAX_SERVER_NAME - 1)],
         ...,
     ] = Field(min_length=1)
 

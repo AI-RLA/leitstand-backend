@@ -1,9 +1,10 @@
-"""Wrappers that confine an external MCP server's failures to its tools and pass on its sources."""
+"""Wrappers and the tool allowlist for an external MCP server, composed by wrap_external_toolset."""
 
 from __future__ import annotations
 
+import re
 import time
-from collections.abc import Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -11,12 +12,43 @@ import structlog
 from pydantic_ai import RunContext, ToolReturn
 from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import InstructionPart
-from pydantic_ai.tools import ToolDefinition
-from pydantic_ai.toolsets import WrapperToolset
+from pydantic_ai.toolsets import AbstractToolset, WrapperToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.ui.vercel_ai.response_types import SourceUrlChunk
 
 logger = structlog.get_logger(__name__)
+
+
+def wrap_external_toolset(
+    name: str, toolset: AbstractToolset[Any], allowed_tools: Iterable[str]
+) -> AbstractToolset[Any]:
+    """Offer one server's allowed tools under its name, with their source and failures confined."""
+    allowlist = ToolAllowlist(frozenset(allowed_tools))
+    guarded = GuardedMCPToolset(SourceLinkToolset(toolset), server=name, allowlist=allowlist)
+    return guarded.filtered(lambda _ctx, tool_def: allowlist.allows(tool_def.name)).prefixed(name)
+
+
+@dataclass(frozen=True)
+class ToolAllowlist:
+    """Name the tools of one server that run without the operator's approval.
+
+    A pattern is a tool name in which `*` matches any characters. The server's annotations, such
+    as `readOnlyHint`, are not consulted.
+    """
+
+    patterns: frozenset[str]
+
+    def allows(self, tool: str) -> bool:
+        return any(_matches(pattern, tool) for pattern in self.patterns)
+
+    def unmatched(self, tools: Collection[str]) -> set[str]:
+        """Return the patterns that match none of the tools."""
+        return {p for p in self.patterns if not any(_matches(p, tool) for tool in tools)}
+
+
+def _matches(pattern: str, tool: str) -> bool:
+    """Tell whether a tool name matches a pattern in which only `*` is a wildcard."""
+    return re.fullmatch(".*".join(map(re.escape, pattern.split("*"))), tool) is not None
 
 
 @dataclass
@@ -37,7 +69,7 @@ class GuardedMCPToolset(WrapperToolset[Any]):
     """
 
     server: str
-    allowed_tools: frozenset[str]
+    allowlist: ToolAllowlist
     # Created once, then handed on by for_run, so every turn's copy of the guard shares it.
     memory: _MCPServerMemory = field(default_factory=_MCPServerMemory)
     _available: bool = field(default=False, init=False)
@@ -76,7 +108,7 @@ class GuardedMCPToolset(WrapperToolset[Any]):
         return await self.wrapped.get_instructions(ctx)
 
     async def get_tools(self, ctx: RunContext[Any]) -> dict[str, ToolsetTool[Any]]:
-        # Offering the tools the model saw last keeps a call to one from ending the turn as an
+        # Offering the tools the server listed last keeps a call to one from ending the turn as an
         # unknown tool.
         if not self._available:
             return self.memory.last_tools
@@ -87,7 +119,7 @@ class GuardedMCPToolset(WrapperToolset[Any]):
             logger.warning("external_mcp_unavailable", server=self.server, reason=str(error))
             return self.memory.last_tools
         self._report_missing(tools)
-        self.memory.last_tools = dict(tools)
+        self.memory.last_tools = tools
         return tools
 
     async def call_tool(
@@ -115,9 +147,9 @@ class GuardedMCPToolset(WrapperToolset[Any]):
         return f"The {self.server} service is unavailable this turn."
 
     def _report_missing(self, tools: dict[str, ToolsetTool[Any]]) -> None:
-        for name in sorted(self.allowed_tools - tools.keys() - self.memory.logged_missing):
-            self.memory.logged_missing.add(name)
-            logger.warning("external_mcp_tool_missing", server=self.server, tool=name)
+        for pattern in sorted(self.allowlist.unmatched(tools.keys()) - self.memory.logged_missing):
+            self.memory.logged_missing.add(pattern)
+            logger.warning("external_mcp_tool_missing", server=self.server, tool=pattern)
 
 
 @dataclass
@@ -147,11 +179,6 @@ def _declared_source(tool: ToolsetTool[Any]) -> tuple[str, str] | None:
     if all(isinstance(source.get(key), str) for key in ("title", "url")):
         return source["title"], source["url"]
     return None
-
-
-def is_read_only(tool: ToolDefinition) -> bool:
-    """Tell whether a server marks a tool as changing nothing, the only kind that skips approval."""
-    return _nested_dict(tool.metadata, "annotations").get("readOnlyHint") is True
 
 
 def _nested_dict(value: Any, key: str) -> dict[str, Any]:

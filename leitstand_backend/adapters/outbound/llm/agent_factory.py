@@ -36,11 +36,7 @@ from leitstand_backend.adapters.outbound.llm.domain_mcp import (
     DOMAIN_TOOL_PREFIX,
     requires_approval,
 )
-from leitstand_backend.adapters.outbound.llm.external_toolsets import (
-    GuardedMCPToolset,
-    SourceLinkToolset,
-    is_read_only,
-)
+from leitstand_backend.adapters.outbound.llm.external_toolsets import wrap_external_toolset
 from leitstand_backend.infrastructure.external_mcp import ExternalMCPServer
 from leitstand_backend.infrastructure.settings import Settings
 
@@ -178,8 +174,7 @@ def _requires_approval(ctx: RunContext, tool_def: ToolDefinition, args: dict[str
 
 
 def _external_toolset(name: str, server: ExternalMCPServer) -> AbstractToolset[Any]:
-    """Offer one server's allowed read-only tools, with their source, and contain its failures."""
-    allowed = frozenset(server.allowed_tools)
+    """Offer one server's allowed tools, with their source, and contain its failures."""
     # A session per turn, so a session that broke in one turn is not reused by an overlapping one.
     session = _RunScopedMCPToolset(
         server.url,
@@ -190,9 +185,7 @@ def _external_toolset(name: str, server: ExternalMCPServer) -> AbstractToolset[A
         tool_error_behavior="failed",
         include_instructions=True,
     )
-    offered = session.filtered(lambda ctx, tool: tool.name in allowed and is_read_only(tool))
-    guarded = GuardedMCPToolset(SourceLinkToolset(offered), server=name, allowed_tools=allowed)
-    return guarded.prefixed(name)
+    return wrap_external_toolset(name, session, server.allowed_tools)
 
 
 def build_chat_agent(
@@ -203,8 +196,8 @@ def build_chat_agent(
     """Build the chat agent against the in-process domain server and any external servers.
 
     ``output_type`` must include DeferredToolRequests: without it an approval-required tool does not
-    pause for the operator, it fails the run with a tool error. External servers are read-only, so
-    none of their tools waits for approval.
+    pause for the operator, it fails the run with a tool error. External tools never wait for
+    approval: `allowed_tools` in the server configuration is their approval.
     """
     model = _build_model(settings)
     # approval_required is applied before prefixed, so the predicate sees the bare operation_id.
