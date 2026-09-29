@@ -178,9 +178,9 @@ below.
 
 ### External MCP servers
 
-The AI assistant can also use tools of other MCP servers, listed in `config/mcp_servers.json` in
-the usual `mcpServers` format plus one key of our own, `allowed_tools`. How to write and add a
-server: [`mcp-servers/README.md`](mcp-servers/README.md).
+The AI assistant can also use tools of other MCP servers, listed in `config/mcp_servers.json`.
+Only Streamable HTTP servers are supported, and an entry takes only the keys below. How to write
+and add a server: [`mcp-servers/README.md`](mcp-servers/README.md).
 
 ```json
 {
@@ -195,14 +195,16 @@ server: [`mcp-servers/README.md`](mcp-servers/README.md).
 
 | Key | Description |
 |---|---|
-| `<name>` | Server name. The AI assistant sees each tool as `<name>_<tool>`, for example `weather_daily_forecast`. Lower-case letters and digits, at most 24 characters, not starting with `leitstand`. |
+| `<name>` | Server name. The AI assistant sees each tool as `<name>_<tool>`, for example `weather_daily_forecast`. Lower-case letters and digits, starting with a letter, at most 24 characters, not starting with `leitstand`. |
 | `url` | Streamable HTTP endpoint. |
-| `allowed_tools` | Names of the server's tools the AI assistant may use, without the prefix. Tools not listed are not offered. Each name at most 39 characters, 64 including the prefix. |
-| `timeout` | Timeout per call in milliseconds. Default 10000. |
+| `allowed_tools` | Tools the AI assistant may use, named without the prefix. `*` matches any characters, so `"*"` allows every tool and `"get_*"` every tool starting with `get_`. At most 39 characters each, 64 including the prefix. |
+| `timeout` | Timeout per call in milliseconds, at most 60000. Default 10000. |
 | `headers` | HTTP headers sent with each request. |
 
-- Only tools the server marks read-only are offered, because they run without the operator's
-  approval. A server's texts reach the model unchanged, so configure only servers you trust.
+- An allowed tool runs without the operator's approval. The server's annotations, such as
+  `readOnlyHint`, are not checked. `"*"` also allows tools the server adds later.
+- A server receives whatever the AI assistant passes to its tools and its results reach the AI
+  assistant unchanged. Configure only servers you trust with that data.
 - An invalid entry is skipped with a log line (`external_mcp_entry_invalid`). While a server is
   down, the AI assistant answers without its tools.
 

@@ -36,7 +36,8 @@ from leitstand_backend.adapters.outbound.llm.agent_factory import (
 from leitstand_backend.adapters.outbound.llm.domain_mcp import build_domain_mcp
 from leitstand_backend.adapters.outbound.llm.external_toolsets import (
     GuardedMCPToolset,
-    SourceLinkToolset,
+    ToolAllowlist,
+    wrap_external_toolset,
 )
 from leitstand_backend.infrastructure.external_mcp import ExternalMCPServer
 from leitstand_backend.infrastructure.factory import create_app
@@ -80,8 +81,7 @@ class _Faulty(FunctionToolset):
 
 
 def _guard(inner, allowed=("daily_forecast",)):
-    guard = GuardedMCPToolset(inner, server="weather", allowed_tools=frozenset(allowed))
-    return guard.prefixed("weather")
+    return wrap_external_toolset("weather", inner, allowed)
 
 
 def _results(messages: list[ModelMessage]) -> list[Any]:
@@ -204,9 +204,8 @@ async def test_each_turn_gets_its_own_guard_and_shares_the_memory(renewed: bool)
     """Overlapping turns must not share one guard's state, whatever the wrapped toolset does."""
     _Recording.entered.clear()
     inner = _RunScopedMCPToolset(_served(), tool_error_behavior="failed") if renewed else _Faulty()
-    toolset = _Recording(
-        inner, server="weather", allowed_tools=frozenset({"daily_forecast"})
-    ).prefixed("weather")
+    allowlist = ToolAllowlist(frozenset({"daily_forecast"}))
+    toolset = _Recording(inner, server="weather", allowlist=allowlist).prefixed("weather")
     await _turn(toolset)
     await _turn(toolset)
 
@@ -220,7 +219,7 @@ async def test_the_source_reaches_the_stream_and_not_the_model() -> None:
     session = _RunScopedMCPToolset(_served(), tool_error_behavior="failed")
     agent = Agent(
         FunctionModel(_calls_twice_then_answers({})),
-        toolsets=[_guard(SourceLinkToolset(session))],
+        toolsets=[_guard(session)],
         retries=1,
     )
 
@@ -295,7 +294,7 @@ def _serving(server: FastMCP) -> Iterator[tuple[str, Callable[[], None]]]:
         stop()
 
 
-async def test_only_allowed_read_only_tools_arrive_and_none_waits_for_approval() -> None:
+async def test_only_allowed_tools_arrive_and_none_waits_for_approval() -> None:
     settings = Settings(zenoh_disabled=True, auto_migrate=False)
     domain_mcp, loopback = build_domain_mcp(create_app(settings), AgentOrigin())
     seen: dict[str, Any] = {}
@@ -311,8 +310,8 @@ async def test_only_allowed_read_only_tools_arrive_and_none_waits_for_approval()
             await loopback.aclose()
 
     assert not isinstance(result.output, DeferredToolRequests)
-    weather = [name for name in seen["tools"] if name.startswith("weather_")]
-    assert weather == ["weather_daily_forecast"]
+    weather = sorted(name for name in seen["tools"] if name.startswith("weather_"))
+    assert weather == ["weather_daily_forecast", "weather_radar"]
     assert all(part.part_kind == "tool-return" for part in seen["results"])
 
 
