@@ -6,7 +6,6 @@ from uuid import uuid4
 import pytest
 
 from leitstand_backend.domain.errors import (
-    ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     RobotPhysicalParametersMissing,
     UnsupportedStageKind,
@@ -79,12 +78,11 @@ def test_a_wider_turning_robot_is_refused() -> None:
         validate_plan_fits_robot("r1", [coverage_stage(turning_radius_m=1.5)], sheet)
 
 
-def test_a_robot_wider_than_the_implement_is_refused() -> None:
+def test_a_track_wider_than_the_working_width_is_accepted() -> None:
     sheet = _factsheet(
         physical_parameters=PhysicalParameters(track_width_m=4.0, min_turning_radius_m=0.0)
     )
-    with pytest.raises(ImplementNarrowerThanRobot):
-        validate_plan_fits_robot("r1", [coverage_stage(operation_width_m=3.0)], sheet)
+    validate_plan_fits_robot("r1", [coverage_stage(operation_width_m=3.0)], sheet)
 
 
 def test_a_mission_without_coverage_needs_no_parameters() -> None:

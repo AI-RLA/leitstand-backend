@@ -41,7 +41,6 @@ from leitstand_backend.domain.errors import (
     DuplicateStageId,
     FieldNotFoundError,
     FieldNotPlannable,
-    ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     InvalidMissionTransition,
     MissionArchived,
@@ -104,7 +103,6 @@ _ROBOT_FIT_ERRORS = (
     UnknownSiteForRobot,
     UnsupportedWaypointFrame,
     IncompatibleTurningRadius,
-    ImplementNarrowerThanRobot,
     RobotPhysicalParametersMissing,
     StaleCoverageBoundary,
 )

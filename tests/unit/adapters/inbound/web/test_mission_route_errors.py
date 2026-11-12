@@ -18,7 +18,6 @@ from leitstand_backend.domain.errors import (
     CoveragePlanRejected,
     FieldNotFoundError,
     FieldNotPlannable,
-    ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     InvalidMissionTransition,
     MissionArchived,
@@ -70,7 +69,6 @@ _CASES = [
     (UnsupportedStageKind("scout", _STAGE_ID, "coverage"), 422),
     (UnsupportedWaypointFrame("scout", _STAGE_ID, "site_local"), 422),
     (IncompatibleTurningRadius("scout", 1.5, 0.0), 422),
-    (ImplementNarrowerThanRobot("scout", 4.0, 3.0), 422),
     (StaleCoverageBoundary(uuid4(), "has been edited"), 422),
 ]
 

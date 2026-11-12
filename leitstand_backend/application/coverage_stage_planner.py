@@ -170,11 +170,11 @@ async def unchanged(
 
     machine = _machine_values(inputs, factsheets)
     params = provenance.params
+    # The robot's wheel track is not compared, because the planned path does not depend on it.
     if (
         inputs.operation_width_m != params.operation_width_m
         or machine.turning_radius_m != params.turning_radius_m
         or machine.headland_width_m != params.headland_width_m
-        or machine.track_width_m != params.track_width_m
         or inputs.allow_overlap != bool(params.allow_overlap)
         or inputs.params_robot_id != provenance.planned_for_robot_id
     ):
