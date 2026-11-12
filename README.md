@@ -121,10 +121,10 @@ bare-value file per secret under `secrets/` (`/run/secrets` in Docker), in that 
 | `LEITSTAND_CORS_ORIGINS` | empty | comma-separated or JSON list (middleware added only when non-empty) |
 | `LEITSTAND_LLM_BASE_URL` | `http://localhost:8000/v1` | any OpenAI-compatible endpoint |
 | `LEITSTAND_LLM_API_KEY` | unset | API key, if the endpoint needs one; normally `secrets/leitstand_llm_api_key` |
-| `LEITSTAND_LLM_MODEL` | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | model name |
+| `LEITSTAND_LLM_MODEL` | `vllm:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | `<provider>:<model>`. The provider shapes the requests for that server, for example `vllm`, `ollama` or `openrouter`, and `openai-chat` for any other OpenAI-compatible server. `LEITSTAND_LLM_BASE_URL` names the server |
 | `LEITSTAND_LLM_CONNECT_TIMEOUT_S` | `3` | connect timeout |
 | `LEITSTAND_LLM_READ_TIMEOUT_S` | `60` | read timeout |
-| `LEITSTAND_LLM_REASONING` | `off` | `off` disables the model's chain of thought |
+| `LEITSTAND_LLM_REASONING` | `off` | `off` disables the model's chain of thought through a chat template flag, which only vLLM is known to read |
 | `LEITSTAND_CHAT_ENABLED` | `true` | expose `POST /api/v1/chat` |
 | `LEITSTAND_CHAT_MAX_TOOL_CALLS` | `10` | max tool calls per turn |
 | `LEITSTAND_MCP_SERVERS_FILE` | unset | external MCP servers for the AI assistant, see below. Unset means none |
