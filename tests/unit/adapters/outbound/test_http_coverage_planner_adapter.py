@@ -146,3 +146,21 @@ async def test_a_reply_missing_a_field_is_an_outage_not_a_silent_default():
 
     with pytest.raises(CoveragePlannerUnavailable):
         await _adapter(handler).plan(_boundary(), _params())
+
+
+@pytest.mark.asyncio
+async def test_the_version_is_read_from_the_planner():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/healthz"
+        return httpx.Response(200, json={"status": "ok", "planner_version": "fields2cover 1.2.1"})
+
+    assert await _adapter(handler).version() == "fields2cover 1.2.1"
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_planner_has_no_version():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(CoveragePlannerUnavailable):
+        await _adapter(handler).version()

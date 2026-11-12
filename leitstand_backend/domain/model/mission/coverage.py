@@ -143,7 +143,7 @@ class CoveragePlan(BaseModel):
     )
     metrics: CoverageMetrics
     planner_version: str = Field(
-        min_length=1, description="Planner name and version, e.g. 'fields2cover 1.2.1'."
+        min_length=1, description="Planner name and version, e.g. 'fields2cover v1.2.1, planner 2'."
     )
 
 

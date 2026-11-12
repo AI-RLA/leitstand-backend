@@ -16,7 +16,11 @@ import pyproj
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-PLANNER_VERSION = os.environ.get("F2C_VERSION", "unknown")
+# The revision is raised whenever the same request would give a different path.
+PLANNER_VERSION = f"{os.environ.get('F2C_VERSION', 'unknown')}, planner 2"
+# At most this many hull edges are tried as swath directions, which bounds the search time on a
+# boundary with many points.
+_MAX_EDGE_DIRECTIONS = 32
 
 app = FastAPI(title="leitstand coverage planner")
 
@@ -164,7 +168,7 @@ def plan(request: PlanRequest) -> PlanResponse:
     mainland = inner.getGeometry(0)
     mainland_boundary = _boundary_out(mainland, to_wgs84)
     if request.swath_angle_deg is None:
-        swaths = generator.generateBestSwaths(f2c.OBJ_NSwath(), request.operation_width_m, mainland)
+        swaths = _fewest_swaths(generator, request.operation_width_m, mainland)
     else:
         # F2C's swath angle and a compass bearing agree modulo the 180 degrees that separate
         # driving a line one way from the other, so the requested bearing passes straight through
@@ -218,10 +222,43 @@ def plan(request: PlanRequest) -> PlanResponse:
     )
 
 
+def _fewest_swaths(generator: f2c.SG_BruteForce, width_m: float, cell: Any) -> f2c.Swaths:
+    """Return the fewest-swath layout, ties broken by the narrowest field width across the swaths.
+
+    Besides the whole degrees, the directions of the convex hull's edges are tried, because the
+    narrowest width is always reached with the swaths parallel to one of them.
+    """
+    hull = _outer_ring(cell.ConvexHull())
+    bearings = {_bearing(start, end) % 180.0 for start, end in zip(hull, hull[1:]) if start != end}
+    narrowest = sorted(bearings, key=lambda bearing: _width_across(hull, bearing))
+    edges = sorted(narrowest[:_MAX_EDGE_DIRECTIONS])
+    # The opposite bearing lays the lines from the other side and wins only by saving a swath.
+    bearing, turn = min(
+        ((bearing, turn) for turn in (0.0, 180.0) for bearing in [*range(180), *edges]),
+        key=lambda candidate: (
+            generator.generateSwaths(math.radians(sum(candidate)), width_m, cell).size(),
+            _width_across(hull, candidate[0]),
+        ),
+    )
+    return generator.generateSwaths(math.radians(bearing + turn), width_m, cell)
+
+
+def _width_across(points: list[tuple[float, float]], bearing_deg: float) -> float:
+    """Return how far the points extend across swaths laid on the bearing, in metres."""
+    # x east and y north, so a bearing points along (sin, cos) and (cos, -sin) is square to it.
+    across_x, across_y = math.cos(math.radians(bearing_deg)), -math.sin(math.radians(bearing_deg))
+    offsets = [x * across_x + y * across_y for x, y in points]
+    return max(offsets) - min(offsets)
+
+
+def _outer_ring(cell: Any) -> list[tuple[float, float]]:
+    ring = cell.getGeometry(0)
+    return [(ring.getX(i), ring.getY(i)) for i in range(ring.size())]
+
+
 def _boundary_out(cell: Any, to_wgs84: pyproj.Transformer) -> Boundary:
     """Return a planner-frame cell's outer ring as a closed GeoJSON polygon."""
-    ring = cell.getGeometry(0)
-    points = [list(to_wgs84.transform(ring.getX(i), ring.getY(i))) for i in range(ring.size())]
+    points = [list(to_wgs84.transform(x, y)) for x, y in _outer_ring(cell)]
     if points[0] != points[-1]:
         points.append(points[0])
     return Boundary(type="Polygon", coordinates=[points])

@@ -15,6 +15,9 @@ from leitstand_backend.domain.model.mission.coverage import (
 from leitstand_backend.domain.model.mission.waypoint import WGS84Waypoint
 from leitstand_backend.ports.outbound.coverage_planner import CoveragePlanner
 
+# Short, because a mission save waits for it, while the client's timeout is sized for a plan.
+_VERSION_TIMEOUT_S = 3.0
+
 
 class HttpCoveragePlannerAdapter(CoveragePlanner):
     def __init__(self, base_url: str, client: httpx.AsyncClient) -> None:
@@ -86,6 +89,16 @@ class HttpCoveragePlannerAdapter(CoveragePlanner):
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CoveragePlannerUnavailable(f"coverage planner replied unusably: {exc}") from exc
+
+    async def version(self) -> str:
+        try:
+            response = await self._client.get(
+                f"{self._base_url}/healthz", timeout=_VERSION_TIMEOUT_S
+            )
+            response.raise_for_status()
+            return response.json()["planner_version"]
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise CoveragePlannerUnavailable(f"coverage planner version unknown: {exc}") from exc
 
 
 def _detail(response: httpx.Response) -> object:

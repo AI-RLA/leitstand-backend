@@ -205,6 +205,9 @@ class _NullCoveragePlanner(CoveragePlanner):
     async def plan(self, boundary: Polygon, params: CoverageParams) -> CoveragePlan:
         raise CoveragePlannerUnavailable()
 
+    async def version(self) -> str:
+        raise CoveragePlannerUnavailable()
+
 
 def _build_coverage_planner(
     settings: Settings,

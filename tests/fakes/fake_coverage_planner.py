@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from geojson_pydantic import Polygon
 
+from leitstand_backend.domain.errors import CoveragePlannerUnavailable
 from leitstand_backend.domain.model.mission.coverage import CoverageParams, CoveragePlan
 from leitstand_backend.ports.outbound.coverage_planner import CoveragePlanner
 
@@ -19,9 +20,16 @@ class FakeCoveragePlanner(CoveragePlanner):
         self.result = result
         self.error: Exception | None = None
         self.calls: list[tuple[Polygon, CoverageParams]] = []
+        self.version_calls = 0
 
     async def plan(self, boundary: Polygon, params: CoverageParams) -> CoveragePlan:
         self.calls.append((boundary, params))
         if self.error is not None:
             raise self.error
         return self.result
+
+    async def version(self) -> str:
+        self.version_calls += 1
+        if isinstance(self.error, CoveragePlannerUnavailable):
+            raise self.error
+        return self.result.planner_version
