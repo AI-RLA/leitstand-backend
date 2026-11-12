@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from leitstand_backend.adapters.outbound.llm.domain_mcp import DOMAIN_TOOL_PREFIX
 from leitstand_backend.infrastructure.external_mcp import load_external_servers
 
 _WEATHER = {
@@ -31,7 +30,7 @@ def test_a_valid_file_loads_every_entry(tmp_path: Path) -> None:
         "allowed_tools": ["moisture"],
     }
     servers = load_external_servers(
-        _write(tmp_path, {"mcpServers": {"weather": _WEATHER, "soil": second}}), DOMAIN_TOOL_PREFIX
+        _write(tmp_path, {"mcpServers": {"weather": _WEATHER, "soil": second}}), reserved=()
     )
 
     assert sorted(servers) == ["soil", "weather"]
@@ -53,7 +52,7 @@ def test_a_valid_file_loads_every_entry(tmp_path: Path) -> None:
 )
 def test_an_unreadable_file_gives_no_servers(tmp_path: Path, content: str) -> None:
     with capture_logs() as logs:
-        servers = load_external_servers(_write(tmp_path, content), DOMAIN_TOOL_PREFIX)
+        servers = load_external_servers(_write(tmp_path, content), reserved=())
 
     assert servers == {}
     assert [log["event"] for log in logs] == ["external_mcp_config_unreadable"]
@@ -61,7 +60,7 @@ def test_an_unreadable_file_gives_no_servers(tmp_path: Path, content: str) -> No
 
 def test_a_missing_file_gives_no_servers(tmp_path: Path) -> None:
     with capture_logs() as logs:
-        servers = load_external_servers(tmp_path / "absent.json", DOMAIN_TOOL_PREFIX)
+        servers = load_external_servers(tmp_path / "absent.json", reserved=())
 
     assert servers == {}
     assert [log["event"] for log in logs] == ["external_mcp_config_unreadable"]
@@ -70,7 +69,7 @@ def test_a_missing_file_gives_no_servers(tmp_path: Path) -> None:
 def _load_with_a_valid_neighbour(tmp_path: Path, name: str, entry: dict) -> dict:
     neighbour = {**_WEATHER, "url": "http://mcp-soil:8092/mcp"}
     content = {"mcpServers": {name: entry, "soil": neighbour}}
-    return load_external_servers(_write(tmp_path, content), DOMAIN_TOOL_PREFIX)
+    return load_external_servers(_write(tmp_path, content), reserved=())
 
 
 @pytest.mark.parametrize(
@@ -97,10 +96,21 @@ def test_an_invalid_entry_is_skipped_and_the_others_load(tmp_path: Path, change:
     ]
 
 
+def test_a_server_named_after_an_own_tool_word_is_skipped(tmp_path: Path) -> None:
+    """A server called dispatch would name a tool dispatch_mission, which the backend owns."""
+    content = {"mcpServers": {"dispatch": _WEATHER, "weather": _WEATHER}}
+    with capture_logs() as logs:
+        servers = load_external_servers(_write(tmp_path, content), reserved={"dispatch", "list"})
+
+    assert list(servers) == ["weather"]
+    assert [(log["event"], log["server"]) for log in logs] == [
+        ("external_mcp_entry_invalid", "dispatch")
+    ]
+
+
 @pytest.mark.parametrize(
     "name",
     [
-        pytest.param("leitstandx", id="reserved prefix"),
         pytest.param("a_b", id="underscore"),
         pytest.param("Weather", id="upper case"),
         pytest.param("w" * 25, id="longer than 24"),
@@ -137,7 +147,7 @@ def test_a_variable_is_filled_in_from_the_environment(
     entry = {**_WEATHER, "url": "${MCP_TEST_URL:-http://mcp-weather:8091/mcp}"}
 
     servers = load_external_servers(
-        _write(tmp_path, {"mcpServers": {"weather": entry}}), DOMAIN_TOOL_PREFIX
+        _write(tmp_path, {"mcpServers": {"weather": entry}}), reserved=()
     )
 
     assert servers["weather"].url == url
@@ -161,7 +171,7 @@ def test_the_shipped_file_loads_with_the_compose_address(monkeypatch: pytest.Mon
     monkeypatch.delenv("MCP_WEATHER_URL", raising=False)
     path = Path(__file__).parents[3] / "config" / "mcp_servers.json"
 
-    servers = load_external_servers(path, DOMAIN_TOOL_PREFIX)
+    servers = load_external_servers(path, reserved=())
 
     assert servers["weather"].url == "http://mcp-weather:8091/mcp"
 
@@ -177,9 +187,7 @@ def test_variables_are_filled_in_headers_and_several_to_a_string(
         "headers": {"X-Client": "${MCP_TEST_CLIENT}"},
     }
 
-    servers = load_external_servers(
-        _write(tmp_path, {"mcpServers": {"soil": entry}}), DOMAIN_TOOL_PREFIX
-    )
+    servers = load_external_servers(_write(tmp_path, {"mcpServers": {"soil": entry}}), reserved=())
 
     assert servers["soil"].url == "http://mcp-soil:8092/mcp"
     assert servers["soil"].headers == {"X-Client": "leitstand"}

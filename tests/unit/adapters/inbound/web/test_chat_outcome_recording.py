@@ -65,7 +65,7 @@ def _body() -> bytes:
             "role": "assistant",
             "parts": [
                 {
-                    "type": "tool-leitstand_dispatch_mission",
+                    "type": "tool-dispatch_mission",
                     "toolCallId": _CALL,
                     "state": "approval-responded",
                     "input": _ARGS,
@@ -86,7 +86,7 @@ async def _decide_then_lose_the_turn(*, tool_fails: bool) -> InMemoryToolCallRep
     service = ToolCallApprovalService(repo, _USER)
     await service.record_pending_tool_call(
         provider_tool_call_id=_CALL,
-        tool_name="leitstand_dispatch_mission",
+        tool_name="dispatch_mission",
         arguments=_ARGS,
     )
 

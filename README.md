@@ -195,7 +195,7 @@ and add a server: [`mcp-servers/README.md`](mcp-servers/README.md).
 
 | Key | Description |
 |---|---|
-| `<name>` | Server name. The AI assistant sees each tool as `<name>_<tool>`, for example `weather_daily_forecast`. Lower-case letters and digits, starting with a letter, at most 24 characters, not starting with `leitstand`. |
+| `<name>` | Server name. The AI assistant sees each tool as `<name>_<tool>`, for example `weather_daily_forecast`. Lower-case letters and digits, starting with a letter, at most 24 characters. The name must not equal the first word of a backend tool name, such as `list` from `list_robots`, because a server tool could then get the same name as a backend tool. Such a server is skipped and logged. |
 | `url` | Streamable HTTP endpoint. |
 | `allowed_tools` | Tools the AI assistant may use, named without the prefix. `*` matches any characters, so `"*"` allows every tool and `"get_*"` every tool starting with `get_`. At most 39 characters each, 64 including the prefix. |
 | `timeout` | Timeout per call in milliseconds, at most 60000. Default 10000. |

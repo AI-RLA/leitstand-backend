@@ -24,9 +24,6 @@ from leitstand_backend.infrastructure.provenance import (
     tool_call_provenance,
 )
 
-# The prefix the AI assistant sees the backend's own tools under, so no server may take it.
-DOMAIN_TOOL_PREFIX = "leitstand"
-
 # The key the agent packs each call's approval provenance under, in the MCP request metadata. Both
 # ends must agree on it, so it lives here with the server that reads it.
 CALL_PROVENANCE_KEY = "leitstand"
@@ -175,12 +172,12 @@ def _add_agent_hints(route, component) -> None:
 
 
 def requires_approval(tool_name: str) -> bool:
-    """Whether a tool must wait for the operator, given the bare or the prefixed name.
+    """Return whether a tool must wait for the operator's approval.
 
     Denies by default, so a tool nobody classified costs an approval card rather than an
     unauthorised fleet change. Deciding from the write list would invert that.
     """
-    return tool_name.removeprefix(f"{DOMAIN_TOOL_PREFIX}_") not in _READ_TOOLS
+    return tool_name not in _READ_TOOLS
 
 
 _ROUTE_MAPS = [

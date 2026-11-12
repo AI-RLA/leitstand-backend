@@ -6,15 +6,20 @@ rename drops a tool, or a new write route reaches the model ungated.
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import pytest
 from fastmcp import Client
 
 from leitstand_backend.adapters.outbound.llm.domain_mcp import (
-    DOMAIN_TOOL_PREFIX,
     build_domain_mcp,
     requires_approval,
+)
+from leitstand_backend.infrastructure.external_mcp import (
+    load_external_servers,
+    reserved_server_names,
 )
 from leitstand_backend.infrastructure.factory import create_app
 from leitstand_backend.infrastructure.provenance import AgentOrigin
@@ -59,7 +64,6 @@ def _mutating_operation_ids(app) -> set[str]:
 async def test_a_tool_nobody_classified_is_still_gated() -> None:
     """A write route exposed but never declared must be held, not treated as safe."""
     assert requires_approval("estop_robot")
-    assert requires_approval("leitstand_estop_robot")
 
 
 async def test_writes_are_gated_and_reads_are_not() -> None:
@@ -133,7 +137,7 @@ async def test_run_routes_are_exposed_exactly_as_intended() -> None:
     run-addressed write, kept off the agent entirely: notes are the operator's. There is no
     ``reset_mission``. The catch-all excludes whatever the lists omit, so a name alone exposes nothing.
     """
-    names = {tool.name.removeprefix("leitstand_") for tool in await _tools()}
+    names = {tool.name for tool in await _tools()}
     assert "restore_mission" in names and requires_approval("restore_mission")
     assert "annotate_run" not in names
     assert "delete_run" not in names
@@ -141,8 +145,21 @@ async def test_run_routes_are_exposed_exactly_as_intended() -> None:
     assert "list_mission_runs" not in names and "get_run" not in names
 
 
+async def test_no_own_tool_name_keeps_a_shipped_external_server_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend tool named weather_... would keep the shipped weather server from loading."""
+    monkeypatch.delenv("MCP_WEATHER_URL", raising=False)
+    shipped = Path(__file__).parents[5] / "config" / "mcp_servers.json"
+    reserved = reserved_server_names(tool.name for tool in await _tools())
+
+    assert set(load_external_servers(shipped, reserved=reserved)) == set(
+        json.loads(shipped.read_text())["mcpServers"]
+    )
+
+
 async def test_every_tool_name_fits_the_strictest_model_provider() -> None:
     """OpenAI and Gemini accept at most 64 letters, digits, underscores and hyphens per tool name."""
-    names = [f"{DOMAIN_TOOL_PREFIX}_{tool.name}" for tool in await _tools()]
+    names = [tool.name for tool in await _tools()]
 
     assert names and all(re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", name) for name in names)

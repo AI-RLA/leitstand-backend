@@ -15,7 +15,7 @@ from tests.fakes.in_memory_tool_call_repository import InMemoryToolCallRepositor
 
 pytestmark = pytest.mark.asyncio
 
-_VERB = "leitstand_dispatch_mission"
+_VERB = "dispatch_mission"
 _ARGS = {"mission_id": "m-1"}
 
 

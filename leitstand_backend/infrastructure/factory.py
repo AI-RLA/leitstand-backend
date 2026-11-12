@@ -48,7 +48,7 @@ from leitstand_backend.adapters.outbound.llm.agent_factory import (
     build_chat_agent,
     system_prompt_version,
 )
-from leitstand_backend.adapters.outbound.llm.domain_mcp import DOMAIN_TOOL_PREFIX, build_domain_mcp
+from leitstand_backend.adapters.outbound.llm.domain_mcp import build_domain_mcp
 from leitstand_backend.adapters.outbound.messaging.zenoh.mission.mission_dispatcher_adapter import (
     ZenohMissionDispatcherAdapter,
 )
@@ -80,7 +80,10 @@ from leitstand_backend.infrastructure.db import (
 )
 from leitstand_backend.infrastructure.deps import get_current_user
 from leitstand_backend.infrastructure.event_bus import EventBus
-from leitstand_backend.infrastructure.external_mcp import load_external_servers
+from leitstand_backend.infrastructure.external_mcp import (
+    load_external_servers,
+    reserved_server_names,
+)
 from leitstand_backend.infrastructure.factsheet_view import EventBusBackedRobotFactsheetView
 from leitstand_backend.infrastructure.messaging.zenoh import zenoh_session
 from leitstand_backend.infrastructure.middleware import RequestIdMiddleware
@@ -92,7 +95,6 @@ from leitstand_backend.infrastructure.robot_status_projector import (
 from leitstand_backend.infrastructure.settings import Settings
 from leitstand_backend.infrastructure.state_view import EventBusBackedRobotStateView
 from leitstand_backend.infrastructure.transactional_events import TransactionBoundEventPublisher
-from leitstand_backend.logging_setup import configure_logging
 from leitstand_backend.ports.inbound.mission_state import (
     HandleRobotOfflineCommand,
     MissionStateUseCase,
@@ -422,7 +424,6 @@ class _SessionScopedConnectivityUseCase(RobotConnectivityUseCase):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    configure_logging(settings.log_level)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -549,7 +550,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     model=settings.llm_model, prompt_version=system_prompt_version()
                 )
                 domain_mcp, chat_mcp_client = build_domain_mcp(app, origin)
-                external = load_external_servers(settings.mcp_servers_file, DOMAIN_TOOL_PREFIX)
+                own_tools = await domain_mcp.list_tools()
+                external = load_external_servers(
+                    settings.mcp_servers_file,
+                    reserved=reserved_server_names(tool.name for tool in own_tools),
+                )
                 app.state.chat_agent = build_chat_agent(settings, domain_mcp, external)
                 logger.info(
                     "chat_enabled",

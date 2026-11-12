@@ -34,7 +34,7 @@ from leitstand_backend.infrastructure.settings import Settings
 
 pytestmark = pytest.mark.asyncio
 
-_TOOL = "leitstand_list_robots"
+_TOOL = "list_robots"
 _OPERATOR = User(id="operator", name="Operator")
 _ORIGIN = AgentOrigin(model="nemotron", prompt_version="assistant-test")
 
@@ -121,11 +121,7 @@ async def test_an_approved_write_names_its_approver() -> None:
         ):
             return ModelResponse(parts=[TextPart("done")])
         return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    "leitstand_dispatch_mission", {"mission_id": "m-1"}, tool_call_id="call_1"
-                )
-            ]
+            parts=[ToolCallPart("dispatch_mission", {"mission_id": "m-1"}, tool_call_id="call_1")]
         )
 
     decision_id = str(uuid4())

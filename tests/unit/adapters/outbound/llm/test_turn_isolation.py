@@ -25,7 +25,7 @@ from leitstand_backend.infrastructure.settings import Settings
 
 pytestmark = pytest.mark.asyncio
 
-_TOOL = "leitstand_list_robots"
+_TOOL = "list_robots"
 _ORIGIN = AgentOrigin(model="nemotron", prompt_version="assistant-test")
 
 
