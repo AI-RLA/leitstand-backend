@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlsplit
@@ -44,8 +45,15 @@ class ExternalMCPServer(BaseModel):
         return url
 
 
-def load_external_servers(path: Path | None, reserved_prefix: str) -> dict[str, ExternalMCPServer]:
-    """Read the server list, skipping an invalid entry or one that takes the reserved prefix."""
+def reserved_server_names(own_tool_names: Iterable[str]) -> set[str]:
+    """Return the server names whose <server>_<tool> names could clash with a backend tool."""
+    return {name.split("_")[0] for name in own_tool_names}
+
+
+def load_external_servers(
+    path: Path | None, *, reserved: Collection[str]
+) -> dict[str, ExternalMCPServer]:
+    """Read the server list, skipping an invalid entry or one named with a reserved word."""
     if path is None:
         return {}
     try:
@@ -59,14 +67,14 @@ def load_external_servers(path: Path | None, reserved_prefix: str) -> dict[str, 
     loaded: dict[str, ExternalMCPServer] = {}
     for name, entry in servers.items():
         # No underscore, so a prefixed tool name cannot collide with another server's.
-        valid = re.fullmatch(r"[a-z][a-z0-9]*", name) and len(name) <= _MAX_SERVER_NAME
-        if not valid or name.startswith(reserved_prefix):
-            logger.warning(
-                "external_mcp_entry_invalid",
-                server=name,
-                reason=f"name must be up to {_MAX_SERVER_NAME} lower-case letters and digits, "
-                f"not starting with {reserved_prefix}",
-            )
+        if not (re.fullmatch(r"[a-z][a-z0-9]*", name) and len(name) <= _MAX_SERVER_NAME):
+            reason = f"name must be up to {_MAX_SERVER_NAME} lower-case letters and digits"
+        elif name in reserved:
+            reason = "name is the first word of one of the backend's own tools"
+        else:
+            reason = None
+        if reason:
+            logger.warning("external_mcp_entry_invalid", server=name, reason=reason)
             continue
         try:
             loaded[name] = ExternalMCPServer.model_validate(_expand_env_vars(entry))

@@ -144,6 +144,7 @@ async def chat(
         """
         async for event in events:
             if isinstance(event, FunctionToolResultEvent):
+                _log_unsuccessful(event.part)
                 try:
                     accounted = await _record_outcome(approval_service, settled, event.part)
                 except Exception:
@@ -189,6 +190,26 @@ async def chat(
                 logger.warning("chat_turn_ended_with_unknown_outcome", settled=sorted(unaccounted))
 
     return adapter.streaming_response(streamed())
+
+
+def _log_unsuccessful(part: ToolReturnPart | RetryPromptPart) -> None:
+    """Log a tool call that failed or was sent back to the model.
+
+    A call refused before it reaches an approval card is recorded nowhere else.
+    """
+    if isinstance(part, RetryPromptPart):
+        outcome = "retry"
+    elif part.outcome == "failed":
+        outcome = "failed"
+    else:
+        return
+    logger.warning(
+        "chat_tool_call_unsuccessful",
+        tool=part.tool_name,
+        outcome=outcome,
+        # A refusal can quote the whole input it rejected, such as a field boundary.
+        reason=str(part.content)[:300],
+    )
 
 
 async def _record_outcome(

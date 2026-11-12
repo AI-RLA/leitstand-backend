@@ -20,7 +20,7 @@ from tests.fakes.in_memory_tool_call_repository import InMemoryToolCallRepositor
 pytestmark = pytest.mark.asyncio
 
 _USER = "operator"
-_VERB = "leitstand_dispatch_mission"
+_VERB = "dispatch_mission"
 _ARGS = {"mission_id": "m-1"}
 _T0 = datetime(2026, 7, 24, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -149,7 +149,7 @@ async def test_a_different_verb_settles_nothing() -> None:
     """
     service, repo, provider_id = await _service_with_pending()
 
-    settled = await _decide(service, provider_id, tool_name="leitstand_delete_mission")
+    settled = await _decide(service, provider_id, tool_name="delete_mission")
 
     assert settled is None
     assert (await _newest(repo, provider_id)).status is ToolCallStatus.AWAITING_APPROVAL

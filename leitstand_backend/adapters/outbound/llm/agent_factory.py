@@ -33,7 +33,6 @@ from leitstand_backend.adapters.outbound.llm.domain_mcp import (
     APPROVED_KEY,
     CALL_PROVENANCE_KEY,
     DECISION_ID_KEY,
-    DOMAIN_TOOL_PREFIX,
     requires_approval,
 )
 from leitstand_backend.adapters.outbound.llm.external_toolsets import wrap_external_toolset
@@ -200,12 +199,9 @@ def build_chat_agent(
     approval: `allowed_tools` in the server configuration is their approval.
     """
     model = _build_model(settings)
-    # approval_required is applied before prefixed, so the predicate sees the bare operation_id.
-    toolset = (
-        _RunScopedMCPToolset(domain_mcp, process_tool_call=_forward_call_provenance)
-        .approval_required(_requires_approval)
-        .prefixed(DOMAIN_TOOL_PREFIX)
-    )
+    toolset = _RunScopedMCPToolset(
+        domain_mcp, process_tool_call=_forward_call_provenance
+    ).approval_required(_requires_approval)
     externals = [_external_toolset(name, server) for name, server in external.items()]
     agent = Agent(
         model,

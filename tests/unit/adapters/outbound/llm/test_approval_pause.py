@@ -77,13 +77,11 @@ async def test_an_actuating_call_pauses_instead_of_executing() -> None:
     executed: list[str] = []
     agent = _agent(executed)
 
-    with agent.override(
-        model=_calls("leitstand_dispatch_mission", {"mission_id": "m1", "robot_id": "r1"})
-    ):
+    with agent.override(model=_calls("dispatch_mission", {"mission_id": "m1", "robot_id": "r1"})):
         result = await agent.run("dispatch it")
 
     assert isinstance(result.output, DeferredToolRequests)
-    assert [call.tool_name for call in result.output.approvals] == ["leitstand_dispatch_mission"]
+    assert [call.tool_name for call in result.output.approvals] == ["dispatch_mission"]
     assert executed == []  # the tool never ran; it is waiting on the operator's decision
 
 
@@ -92,9 +90,7 @@ async def test_a_read_call_runs_without_approval() -> None:
     executed: list[str] = []
     agent = _agent(executed)
 
-    with agent.override(
-        model=_reads_then_answers("leitstand_list_robots", "scout_2_sim is online.")
-    ):
+    with agent.override(model=_reads_then_answers("list_robots", "scout_2_sim is online.")):
         result = await agent.run("which robots are online?")
 
     assert result.output == "scout_2_sim is online."

@@ -41,7 +41,7 @@ def _messages(provider_id: str, approved: bool):
                     "role": "assistant",
                     "parts": [
                         {
-                            "type": "tool-leitstand_create_mission",
+                            "type": "tool-create_mission",
                             "toolCallId": provider_id,
                             "state": "approval-responded",
                             "input": {"name": "m"},
@@ -59,7 +59,7 @@ async def _service_with_pending(provider_id: str) -> ToolCallApprovalService:
     service = ToolCallApprovalService(InMemoryToolCallRepository(), _USER)
     await service.record_pending_tool_call(
         provider_tool_call_id=provider_id,
-        tool_name="leitstand_create_mission",
+        tool_name="create_mission",
         arguments={"name": "m"},
     )
     return service

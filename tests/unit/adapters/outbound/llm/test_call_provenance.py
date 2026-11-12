@@ -46,8 +46,8 @@ from tests.fakes.in_memory_tool_call_repository import InMemoryToolCallRepositor
 
 pytestmark = pytest.mark.asyncio
 
-_DISPATCH = "leitstand_dispatch_mission"
-_LIST = "leitstand_list_robots"
+_DISPATCH = "dispatch_mission"
+_LIST = "list_robots"
 _OPERATOR = User(id="operator", name="Operator")
 _BAD_MISSION = "invalid"
 

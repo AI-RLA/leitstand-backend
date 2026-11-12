@@ -64,7 +64,7 @@ def _answers(text: str) -> FunctionModel:
 
 def _decision(approved: bool = True, call: str = _CALL) -> dict:
     return {
-        "type": "tool-leitstand_dispatch_mission",
+        "type": "tool-dispatch_mission",
         "toolCallId": call,
         "state": "approval-responded",
         "input": _ARGS,
@@ -95,7 +95,7 @@ async def _drive(messages: list[dict], *, seed: bool) -> tuple[list[str], str, b
     if seed:
         await service.record_pending_tool_call(
             provider_tool_call_id=_CALL,
-            tool_name="leitstand_dispatch_mission",
+            tool_name="dispatch_mission",
             arguments=_ARGS,
         )
 
@@ -196,7 +196,7 @@ async def test_a_repeated_call_id_is_refused() -> None:
     service = ToolCallApprovalService(InMemoryToolCallRepository(), _USER)
     await service.record_pending_tool_call(
         provider_tool_call_id=_CALL,
-        tool_name="leitstand_dispatch_mission",
+        tool_name="dispatch_mission",
         arguments=_ARGS,
     )
     messages = [
@@ -206,7 +206,7 @@ async def test_a_repeated_call_id_is_refused() -> None:
             "parts": [
                 _decision(),
                 {
-                    "type": "tool-leitstand_dispatch_mission",
+                    "type": "tool-dispatch_mission",
                     "toolCallId": _CALL,
                     "state": "input-available",
                     "input": {"mission_id": "m1", "robot_id": "somewhere-else"},
@@ -235,7 +235,7 @@ async def test_a_repeated_id_in_either_spelling_is_refused() -> None:
     service = ToolCallApprovalService(InMemoryToolCallRepository(), _USER)
     await service.record_pending_tool_call(
         provider_tool_call_id=_CALL,
-        tool_name="leitstand_dispatch_mission",
+        tool_name="dispatch_mission",
         arguments=_ARGS,
     )
     messages = [
@@ -245,7 +245,7 @@ async def test_a_repeated_id_in_either_spelling_is_refused() -> None:
             "parts": [
                 _decision(),
                 {
-                    "type": "tool-leitstand_dispatch_mission",
+                    "type": "tool-dispatch_mission",
                     "tool_call_id": _CALL,
                     "state": "input-available",
                     "input": {"mission_id": "m1", "robot_id": "somewhere-else"},
@@ -272,14 +272,14 @@ async def _approved(service: ToolCallApprovalService, call: str) -> DeferredTool
     """
     await service.record_pending_tool_call(
         provider_tool_call_id=call,
-        tool_name="leitstand_dispatch_mission",
+        tool_name="dispatch_mission",
         arguments=_ARGS,
     )
     decision_id = await service.record_decision(
         provider_tool_call_id=call,
         decided_by=str(_USER.id),
         approved=True,
-        tool_name="leitstand_dispatch_mission",
+        tool_name="dispatch_mission",
         arguments=_ARGS,
     )
     assert decision_id is not None
@@ -303,7 +303,7 @@ async def test_a_failed_call_is_recorded_failed() -> None:
         settled,
         RetryPromptPart(
             content="rejected by the robot",
-            tool_name="leitstand_dispatch_mission",
+            tool_name="dispatch_mission",
             tool_call_id="call_x",
         ),
     )
@@ -326,7 +326,7 @@ async def test_a_successful_call_records_its_result() -> None:
         service,
         settled,
         ToolReturnPart(
-            tool_name="leitstand_dispatch_mission",
+            tool_name="dispatch_mission",
             content="dispatched",
             tool_call_id="call_x",
         ),
@@ -347,7 +347,7 @@ async def test_a_denied_return_is_not_recorded_as_an_outcome() -> None:
         service,
         settled,
         ToolReturnPart(
-            tool_name="leitstand_dispatch_mission",
+            tool_name="dispatch_mission",
             content="denied at the gate",
             tool_call_id="call_x",
             outcome="denied",
