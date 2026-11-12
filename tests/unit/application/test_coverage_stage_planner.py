@@ -8,10 +8,12 @@ import pytest
 
 from leitstand_backend.application.coverage_stage_planner import (
     CoverageInputs,
+    RunningPlannerVersion,
     plan_coverage_stage,
     unchanged,
 )
 from leitstand_backend.domain.errors import (
+    CoveragePlannerUnavailable,
     FieldNotFoundError,
     RobotFactsheetMissing,
     TurningRadiusBelowRobot,
@@ -86,7 +88,13 @@ class _World:
         )
 
     async def unchanged(self, inputs: CoverageInputs, stored) -> bool:
-        return await unchanged(inputs, stored, fields=self.fields, factsheets=self.factsheets)
+        return await unchanged(
+            inputs,
+            stored,
+            fields=self.fields,
+            factsheets=self.factsheets,
+            planner_version=RunningPlannerVersion(self.planner),
+        )
 
 
 @pytest.mark.asyncio
@@ -301,3 +309,41 @@ async def test_a_changed_track_width_leaves_the_plan_unchanged():
     world.factsheets.set(_factsheet(track_width_m=1.4))
 
     assert await world.unchanged(world.inputs(), stored)
+
+
+@pytest.mark.asyncio
+async def test_a_plan_made_by_another_planner_version_is_planned_again():
+    world = _World()
+    stored = await world.plan(world.inputs())
+    world.planner.result = world.planner.result.model_copy(
+        update={"planner_version": "fields2cover v1.2.1, planner 2"}
+    )
+
+    assert not await world.unchanged(world.inputs(), stored)
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_planner_leaves_the_stored_plan_in_place():
+    world = _World()
+    stored = await world.plan(world.inputs())
+    world.planner.error = CoveragePlannerUnavailable()
+
+    assert await world.unchanged(world.inputs(), stored)
+
+
+@pytest.mark.asyncio
+async def test_the_planner_is_asked_for_its_version_once_however_often_it_is_checked():
+    world = _World()
+    stored = await world.plan(world.inputs())
+    version = RunningPlannerVersion(world.planner)
+
+    for _ in range(2):
+        assert await unchanged(
+            world.inputs(),
+            stored,
+            fields=world.fields,
+            factsheets=world.factsheets,
+            planner_version=version,
+        )
+
+    assert world.planner.version_calls == 1

@@ -19,3 +19,10 @@ class CoveragePlanner(ABC):
         worse than a refusal. Raise ``CoveragePlannerUnavailable`` when no planner answered, so
         the caller can distinguish an unusable request from an unusable service.
         """
+
+    @abstractmethod
+    async def version(self) -> str:
+        """Return the planner version a plan made now would carry.
+
+        Raise ``CoveragePlannerUnavailable`` when no planner answered.
+        """

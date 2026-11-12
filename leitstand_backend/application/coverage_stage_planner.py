@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from leitstand_backend.domain.errors import (
+    CoveragePlannerUnavailable,
     CoveragePlanRejected,
     FieldNotFoundError,
     FieldNotPlannable,
@@ -84,6 +85,27 @@ class CoverageStageUnchanged(Protocol):
     async def __call__(self, inputs: CoverageInputs, stored: CoverageStage) -> bool: ...
 
 
+class RunningPlannerVersion:
+    """The running planner's version, asked for once, or None while no planner answers.
+
+    Kept after the first answer, so a second check under a mission's row lock sends no request.
+    """
+
+    def __init__(self, planner: CoveragePlanner) -> None:
+        self._planner = planner
+        self._asked = False
+        self._version: str | None = None
+
+    async def get(self) -> str | None:
+        if not self._asked:
+            self._asked = True
+            try:
+                self._version = await self._planner.version()
+            except CoveragePlannerUnavailable:
+                self._version = None
+        return self._version
+
+
 @dataclass(frozen=True)
 class _MachineValues:
     """The values the planner is given, with a record of where each came from."""
@@ -153,6 +175,7 @@ async def unchanged(
     *,
     fields: FieldRepository,
     factsheets: RobotFactsheetView,
+    planner_version: RunningPlannerVersion,
 ) -> bool:
     """True when planning ``inputs`` again would reproduce ``stored``.
 
@@ -182,14 +205,20 @@ async def unchanged(
 
     angle_source = provenance.param_sources.get("swath_angle_deg")
     if inputs.swath_angle_deg is None:
-        return angle_source == "planner"
-    # The stored angle is the planner's echo of the request, which may have passed through
-    # radians on the way, so it is compared to the resolution a machine can steer, not bit for bit.
-    return (
-        angle_source == "manual"
-        and params.swath_angle_deg is not None
-        and abs(inputs.swath_angle_deg - params.swath_angle_deg) < _ANGLE_TOLERANCE_DEG
-    )
+        same_angle = angle_source == "planner"
+    else:
+        # The stored angle is the planner's echo of the request, which may have passed through
+        # radians on the way, so it is compared to the resolution a machine can steer, not bit
+        # for bit.
+        same_angle = (
+            angle_source == "manual"
+            and params.swath_angle_deg is not None
+            and abs(inputs.swath_angle_deg - params.swath_angle_deg) < _ANGLE_TOLERANCE_DEG
+        )
+    if not same_angle:
+        return False
+    # Without a planner the stored plan cannot be replaced, so it stays.
+    return await planner_version.get() in (None, provenance.planner_version)
 
 
 async def _plannable_field(field_id: UUID, fields: FieldRepository) -> Field:

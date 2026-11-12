@@ -32,6 +32,7 @@ from leitstand_backend.application.coverage_stage_planner import (
     CoverageInputs,
     CoverageStagePlanner,
     CoverageStageUnchanged,
+    RunningPlannerVersion,
     plan_coverage_stage,
     unchanged,
 )
@@ -290,9 +291,14 @@ def get_coverage_stage_planner(
 def get_coverage_stage_unchanged(
     fields: FieldRepository = Depends(get_field_repository),
     factsheets: RobotFactsheetView = Depends(get_factsheet_view),
+    planner: CoveragePlanner = Depends(get_coverage_planner),
 ) -> CoverageStageUnchanged:
+    planner_version = RunningPlannerVersion(planner)
+
     async def _unchanged(inputs: CoverageInputs, stored: CoverageStage) -> bool:
-        return await unchanged(inputs, stored, fields=fields, factsheets=factsheets)
+        return await unchanged(
+            inputs, stored, fields=fields, factsheets=factsheets, planner_version=planner_version
+        )
 
     return _unchanged
 
