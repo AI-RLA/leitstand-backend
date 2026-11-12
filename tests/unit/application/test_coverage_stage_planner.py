@@ -41,7 +41,7 @@ ROBOT_RADIUS_M = 1.5
 ROBOT_TRACK_M = 1.2
 
 
-def _factsheet(coverage: bool = True) -> RobotFactsheet:
+def _factsheet(coverage: bool = True, track_width_m: float = ROBOT_TRACK_M) -> RobotFactsheet:
     return RobotFactsheet(
         robot_id=ROBOT_ID,
         navigation=NavigationCapability(supported_waypoint_kinds=[WaypointKind.WGS84]),
@@ -49,7 +49,7 @@ def _factsheet(coverage: bool = True) -> RobotFactsheet:
         if coverage
         else None,
         physical_parameters=PhysicalParameters(
-            track_width_m=ROBOT_TRACK_M, min_turning_radius_m=ROBOT_RADIUS_M
+            track_width_m=track_width_m, min_turning_radius_m=ROBOT_RADIUS_M
         ),
     )
 
@@ -130,6 +130,17 @@ async def test_a_tighter_radius_than_the_robots_is_refused():
 
     assert excinfo.value.min_m == ROBOT_RADIUS_M
     assert world.planner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_track_wider_than_the_working_width_is_planned():
+    world = _World()
+    world.factsheets.set(_factsheet(track_width_m=4.0))
+
+    stage = await world.plan(world.inputs(operation_width_m=3.0))
+
+    assert stage.provenance.params.track_width_m == 4.0
+    assert world.planner.calls
 
 
 @pytest.mark.asyncio
@@ -283,18 +294,10 @@ async def test_a_manual_direction_survives_the_planners_float_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_a_changed_track_width_is_a_change():
+async def test_a_changed_track_width_leaves_the_plan_unchanged():
+    """The planned path does not depend on the wheel track, so a changed track needs no new plan."""
     world = _World()
     stored = await world.plan(world.inputs())
-    world.factsheets.set(
-        RobotFactsheet(
-            robot_id=ROBOT_ID,
-            navigation=NavigationCapability(supported_waypoint_kinds=[WaypointKind.WGS84]),
-            coverage=CoverageCapability(supported_waypoint_kinds=[WaypointKind.WGS84]),
-            physical_parameters=PhysicalParameters(
-                track_width_m=1.4, min_turning_radius_m=ROBOT_RADIUS_M
-            ),
-        )
-    )
+    world.factsheets.set(_factsheet(track_width_m=1.4))
 
-    assert not await world.unchanged(world.inputs(), stored)
+    assert await world.unchanged(world.inputs(), stored)

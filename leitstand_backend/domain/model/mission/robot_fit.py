@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from leitstand_backend.domain.errors import (
-    ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     RobotPhysicalParametersMissing,
     UnsupportedStageKind,
@@ -56,9 +55,8 @@ def validate_against_factsheet(
 def validate_plan_fits_robot(robot_id: str, stages: list[Stage], factsheet: RobotFactsheet) -> None:
     """Reject a planned path this machine cannot drive as it was laid out.
 
-    A wider-turning machine cuts every corner silently, and one wider than the implement the
-    swaths were spaced for drives over the strip it just worked. Each coverage stage is
-    checked on its own parameters, which two stages of one mission need not share.
+    A wider-turning machine cuts every corner silently. Each coverage stage is checked on its own
+    parameters, which two stages of one mission need not share.
     """
     planned = coverage_stages(stages)
     if not planned:
@@ -66,10 +64,7 @@ def validate_plan_fits_robot(robot_id: str, stages: list[Stage], factsheet: Robo
     if factsheet.physical_parameters is None:
         raise RobotPhysicalParametersMissing(robot_id)
     robot_radius_m = factsheet.physical_parameters.min_turning_radius_m
-    track_width_m = factsheet.physical_parameters.track_width_m
     for stage in planned:
         params = stage.provenance.params
         if robot_radius_m > params.turning_radius_m:
             raise IncompatibleTurningRadius(robot_id, robot_radius_m, params.turning_radius_m)
-        if track_width_m > params.operation_width_m:
-            raise ImplementNarrowerThanRobot(robot_id, track_width_m, params.operation_width_m)

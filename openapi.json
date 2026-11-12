@@ -1959,7 +1959,7 @@
               }
             ],
             "title": "Track Width M",
-            "description": "Distance between the machine's wheels in metres, which the implement must at least span. Absent on a plan made before it was recorded."
+            "description": "Distance between the wheels in metres of the robot the plan was made for, as its factsheet stated it at planning time. Absent when planned without a robot or on a plan made before it was recorded."
           },
           "linear_curv_change": {
             "anyOf": [

@@ -167,20 +167,6 @@ class IncompatibleTurningRadius(DomainError):
         self.plan_radius_m = plan_radius_m
 
 
-class ImplementNarrowerThanRobot(DomainError):
-    """Robot is wider than the implement a generated plan spaced its swaths for."""
-
-    def __init__(self, robot_id: str, track_width_m: float, operation_width_m: float):
-        super().__init__(
-            f"robot {robot_id!r} has a {track_width_m} m wheel track, wider than the "
-            f"{operation_width_m} m implement this plan spaced its swaths for; its wheels would "
-            "run over worked ground"
-        )
-        self.robot_id = robot_id
-        self.track_width_m = track_width_m
-        self.operation_width_m = operation_width_m
-
-
 class StaleCoverageBoundary(DomainError):
     """Field a coverage plan was derived from no longer matches what the plan was made against."""
 

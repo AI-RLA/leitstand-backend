@@ -29,7 +29,6 @@ class HttpCoveragePlannerAdapter(CoveragePlanner):
             "headland_width_m": params.headland_width_m,
             "swath_angle_deg": params.swath_angle_deg,
             "linear_curv_change": params.linear_curv_change,
-            "track_width_m": params.track_width_m,
             "allow_overlap": params.allow_overlap,
             "turn_sample_m": params.turn_sample_m,
         }

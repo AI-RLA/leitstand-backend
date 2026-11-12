@@ -38,7 +38,6 @@ class PlanRequest(BaseModel):
     headland_width_m: float = Field(ge=0)
     swath_angle_deg: float | None = Field(default=None, ge=0, lt=180)
     linear_curv_change: float = Field(gt=0)
-    track_width_m: float = Field(gt=0)
     allow_overlap: bool = False
     # On the request rather than configured here: the caller owns the waypoint budget these
     # intervals spend.
@@ -143,12 +142,9 @@ def plan(request: PlanRequest) -> PlanResponse:
     if field_area_m2 <= 0:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "boundary encloses no area")
 
-    # Fields2Cover refuses an implement narrower than the machine, which would drive the wheels
-    # over the strip just worked. Passing the working width for both would waive that.
-    try:
-        robot = f2c.Robot(request.track_width_m, request.operation_width_m)
-    except RuntimeError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    # Fields2Cover requires a machine width, which shapes no part of the path, so the working
+    # width is passed for it.
+    robot = f2c.Robot(request.operation_width_m, request.operation_width_m)
     robot.setMinRadius(request.turning_radius_m)
     robot.linear_curv_change = request.linear_curv_change
 
@@ -184,6 +180,7 @@ def plan(request: PlanRequest) -> PlanResponse:
 
     ordered = f2c.RP_Boustrophedon().genSortedSwaths(swaths)
 
+    # Created per request, because it caches turns without keying them on the turning radius.
     curve = f2c.PP_DubinsCurvesCC()
     # Left to its own default the turn generator emits roughly 0.004 m spacing, two orders of
     # magnitude finer than anything downstream reads.

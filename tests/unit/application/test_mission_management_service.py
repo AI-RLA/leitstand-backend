@@ -15,7 +15,6 @@ from leitstand_backend.application.mission_management_service import MissionMana
 from leitstand_backend.domain.errors import (
     CoveragePlannerUnavailable,
     DuplicateStageId,
-    ImplementNarrowerThanRobot,
     IncompatibleTurningRadius,
     MissionArchived,
     MissionNotArchived,
@@ -555,18 +554,17 @@ async def test_assign_refuses_a_robot_that_turns_wider_than_the_plan():
 
 
 @pytest.mark.asyncio
-async def test_assign_refuses_a_robot_wider_than_the_implement_the_plan_was_spaced_for():
-    """Swath spacing follows the implement, so a machine wider than it overruns worked ground.
-
-    Fields2Cover refuses this geometry at plan time; nothing re-checked it when the plan was
-    handed to a different machine, and the wheels leave no evidence in any status the backend has.
-    """
+async def test_assign_allows_a_track_wider_than_the_working_width():
+    """A sensor footprint or mower deck may be narrower than the machine that carries it."""
     svc, repo, _, factsheets, _, _, fields = _make_svc()
     factsheets.set(_coverage_factsheet(0.5, track_width_m=4.0))
     mission = await _seeded_coverage(svc, repo, fields, radius_planned_for=1.5)
 
-    with pytest.raises(ImplementNarrowerThanRobot):
-        await svc.assign(AssignMissionCommand(mission_id=mission.mission_id, robot_id=ROBOT_ID))
+    assigned = await svc.assign(
+        AssignMissionCommand(mission_id=mission.mission_id, robot_id=ROBOT_ID)
+    )
+
+    assert assigned.mission_id == mission.mission_id
 
 
 @pytest.mark.asyncio
