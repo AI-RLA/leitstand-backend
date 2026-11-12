@@ -15,15 +15,16 @@ from datetime import datetime
 from functools import cache
 from importlib import resources
 from types import MappingProxyType
-from typing import Any
+from typing import Any, get_args
 
 import httpx
 from fastmcp import FastMCP
 from openai import AsyncOpenAI
 from pydantic_ai import Agent, DeferredToolRequests, ModelRetry, RunContext
 from pydantic_ai.mcp import CallToolFunc, MCPToolset, ToolResult
-from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
-from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.models import Model, OpenAIChatCompatibleProvider, infer_model
+from pydantic_ai.models.openai import OpenAIChatModelSettings
+from pydantic_ai.providers import infer_provider_class
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import UsageLimits
@@ -50,6 +51,10 @@ SYSTEM_PROMPT = (
 # A union because an approval-required tool pauses the run, returning DeferredToolRequests in place
 # of an answer.
 ChatAgent = Agent[object, str | DeferredToolRequests]
+
+# pydantic-ai's providers that take our own OpenAI client and use the Chat Completions API. "openai"
+# is left out because it selects the Responses API, which not every OpenAI-compatible server serves.
+_SUPPORTED_PROVIDERS = ("openai-chat", *get_args(OpenAIChatCompatibleProvider.__value__))
 
 
 @cache
@@ -145,13 +150,23 @@ async def _forward_call_provenance(
         raise ModelRetry(_shape_tool_error(str(error))) from error
 
 
-def _build_model(settings: Settings) -> OpenAIChatModel:
-    """Point the agent at the OpenAI-compatible endpoint, failing fast when it is unreachable.
+def _build_model(settings: Settings) -> Model:
+    """Point the agent at the provider the model setting names, failing fast when it is unreachable.
+
+    The prefix of ``llm_model`` selects pydantic-ai's provider class, and with it the profile that
+    shapes requests for that server: vLLM, for example, needs the leading system messages merged.
 
     max_retries=0 because the client's default of 2 silently multiplies both timeouts: an
     unreachable host takes ~10 s instead of ~3 s, and a hung one stays open for three read
     timeouts. A human is watching this turn and can retry.
     """
+    provider, _, model_name = settings.llm_model.partition(":")
+    if provider not in _SUPPORTED_PROVIDERS or not model_name or model_name != model_name.strip():
+        raise ValueError(
+            f"LEITSTAND_LLM_MODEL {settings.llm_model!r} must be <provider>:<model> with one of "
+            f"{', '.join(_SUPPORTED_PROVIDERS)} as provider (openai-chat, not openai, for any "
+            "other OpenAI-compatible server), for example vllm:qwen3.5-9b"
+        )
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(
             settings.llm_read_timeout_s,
@@ -164,7 +179,10 @@ def _build_model(settings: Settings) -> OpenAIChatModel:
         http_client=http_client,
         max_retries=0,
     )
-    return OpenAIChatModel(settings.llm_model, provider=OpenAIProvider(openai_client=openai_client))
+    return infer_model(
+        settings.llm_model,
+        provider_factory=lambda name: infer_provider_class(name)(openai_client=openai_client),
+    )
 
 
 def _requires_approval(ctx: RunContext, tool_def: ToolDefinition, args: dict[str, Any]) -> bool:

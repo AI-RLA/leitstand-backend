@@ -47,11 +47,10 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=10)
     db_password: SecretStr | None = Field(default=None)
 
-    # LLM inference (any OpenAI-compatible host; base_url + model select the provider). A soft
-    # dependency: it runs on a separate box and must never gate boot, liveness or readiness.
+    # LLM inference runs on a separate box, so it must never gate boot, liveness or readiness.
     llm_base_url: str = Field(default="http://localhost:8000/v1")
     llm_api_key: SecretStr | None = Field(default=None)
-    llm_model: str = Field(default="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+    llm_model: str = Field(default="vllm:nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
     # Split deliberately: generation is genuinely slow, but an unreachable host must fail in
     # seconds rather than hold the turn open for the whole read timeout.
     llm_connect_timeout_s: int = Field(default=3)
