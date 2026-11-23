@@ -23,7 +23,7 @@ def robot_aggregate_topic(robot_id: str) -> str:
 
 
 def mission_topic(mission_id: UUID, kind: str) -> str:
-    """Per-mission topic. ``kind`` is state | lifecycle."""
+    """Per-mission topic. ``kind`` is state, lifecycle, created or changed."""
     return f"events/mission/{mission_id}/{kind}"
 
 

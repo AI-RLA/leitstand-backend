@@ -1,4 +1,4 @@
-"""Run lifecycle event: publish the status-change notification."""
+"""Mission events: run lifecycle transitions and changes to a mission or its runs."""
 
 from uuid import UUID
 
@@ -33,3 +33,13 @@ def emit_run_lifecycle(
     if reason is not None:
         payload["reason"] = reason
     events.publish(mission_topic(mission_id, "lifecycle"), payload, latch=False)
+
+
+def emit_mission_created(events: EventPublisher, mission_id: UUID) -> None:
+    """Announce a new mission on its own topic, since lifecycle events describe a run and its robot."""
+    events.publish(mission_topic(mission_id, "created"), {"mission_id": str(mission_id)})
+
+
+def emit_mission_changed(events: EventPublisher, mission_id: UUID) -> None:
+    """Announce a change to a mission or one of its runs, so every view reads it again."""
+    events.publish(mission_topic(mission_id, "changed"), {"mission_id": str(mission_id)})

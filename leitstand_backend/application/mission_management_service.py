@@ -12,6 +12,10 @@ from leitstand_backend.application.coverage_stage_planner import (
     CoverageStagePlanner,
     CoverageStageUnchanged,
 )
+from leitstand_backend.application.mission_events import (
+    emit_mission_changed,
+    emit_mission_created,
+)
 from leitstand_backend.domain.errors import (
     DuplicateStageId,
     MissionArchived,
@@ -55,7 +59,7 @@ from leitstand_backend.ports.inbound.mission_management import (
     UpdateMissionCommand,
 )
 from leitstand_backend.ports.outbound.audit_log import AuditWriter
-from leitstand_backend.ports.outbound.event_publisher import EventPublisher, mission_topic
+from leitstand_backend.ports.outbound.event_publisher import EventPublisher
 from leitstand_backend.ports.outbound.field_repository import FieldRepository
 from leitstand_backend.ports.outbound.mission_repository import MissionRepository
 from leitstand_backend.ports.outbound.mission_run_repository import MissionRunRepository
@@ -107,13 +111,8 @@ class MissionManagementService(MissionManagementUseCase):
             str(saved.mission_id),
             command.model_dump(mode="json"),
         )
-        # Not a lifecycle event: a mission comes into existence rather than transitioning into it.
-        # Announced anyway, or a mission created in one place stays invisible everywhere else.
-        self._events.publish(
-            mission_topic(saved.mission_id, "created"),
-            {"mission_id": str(saved.mission_id)},
-        )
         await self._audit_planned(saved.mission_id, planned, before=[], after=saved.stages)
+        emit_mission_created(self._events, saved.mission_id)
         return saved
 
     async def update(self, command: UpdateMissionCommand) -> Mission:
@@ -176,6 +175,7 @@ class MissionManagementService(MissionManagementUseCase):
         await self._audit_planned(
             saved.mission_id, planned, before=before.stages, after=saved.stages
         )
+        emit_mission_changed(self._events, saved.mission_id)
         return saved
 
     async def create_generated(self, command: CreateGeneratedMissionCommand) -> Mission:
@@ -197,6 +197,7 @@ class MissionManagementService(MissionManagementUseCase):
             str(saved.mission_id),
             {"name": saved.name, "stage_count": len(saved.stages), "generated": True},
         )
+        emit_mission_created(self._events, saved.mission_id)
         return saved
 
     async def replace_generated_stage(self, command: ReplaceGeneratedStageCommand) -> Mission:
@@ -219,6 +220,7 @@ class MissionManagementService(MissionManagementUseCase):
             str(saved.mission_id),
             {"stage_id": str(command.stage.stage_id)},
         )
+        emit_mission_changed(self._events, saved.mission_id)
         return saved
 
     async def assign(self, command: AssignMissionCommand) -> Mission:
@@ -248,6 +250,7 @@ class MissionManagementService(MissionManagementUseCase):
             str(command.mission_id),
             {"robot_id": command.robot_id},
         )
+        emit_mission_changed(self._events, command.mission_id)
         return (await self._repo.get(command.mission_id)) or mission
 
     async def unassign(self, command: UnassignMissionCommand) -> Mission:
@@ -259,6 +262,7 @@ class MissionManagementService(MissionManagementUseCase):
             raise MissionArchived(command.mission_id)
         await self._repo.set_assigned_robot(command.mission_id, None)
         await self._audit("mission.unassign", "mission", str(command.mission_id), {})
+        emit_mission_changed(self._events, command.mission_id)
         return (await self._repo.get(command.mission_id)) or mission
 
     async def delete(self, command: DeleteMissionCommand) -> None:
@@ -276,9 +280,10 @@ class MissionManagementService(MissionManagementUseCase):
         if await self._runs.count_by_mission(command.mission_id):
             await self._repo.archive(command.mission_id)
             await self._audit("mission.archive", "mission", str(command.mission_id), {})
-            return
-        await self._repo.delete(command.mission_id)
-        await self._audit("mission.delete", "mission", str(command.mission_id), {})
+        else:
+            await self._repo.delete(command.mission_id)
+            await self._audit("mission.delete", "mission", str(command.mission_id), {})
+        emit_mission_changed(self._events, command.mission_id)
 
     async def restore(self, command: RestoreMissionCommand) -> Mission:
         """Bring an archived mission back. One that is not archived has nothing to restore."""
@@ -291,6 +296,7 @@ class MissionManagementService(MissionManagementUseCase):
         if restored is None:
             raise MissionNotFoundError(command.mission_id)
         await self._audit("mission.restore", "mission", str(command.mission_id), {})
+        emit_mission_changed(self._events, command.mission_id)
         return restored
 
     async def get(self, mission_id: UUID) -> Mission | None:

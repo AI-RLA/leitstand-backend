@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from leitstand_backend.application.coverage_boundary import require_current_boundary
-from leitstand_backend.application.mission_events import emit_run_lifecycle
+from leitstand_backend.application.mission_events import emit_mission_changed, emit_run_lifecycle
 from leitstand_backend.application.run_state_view import (
     publish_run_state,
     settle_stage_state,
@@ -183,6 +183,7 @@ class RunService(RunManagementUseCase):
                 "allow_concurrent": command.allow_concurrent,
             },
         )
+        emit_mission_changed(self._events, run.mission_id)
         return run
 
     async def settle(self, command: SettleRunCommand) -> MissionRun:
@@ -441,6 +442,7 @@ class RunService(RunManagementUseCase):
         await self._audit(
             "run.annotate", "mission", str(updated.mission_id), {"run_id": str(updated.run_id)}
         )
+        emit_mission_changed(self._events, updated.mission_id)
         return updated
 
     async def delete(self, command: DeleteRunCommand) -> None:
@@ -462,6 +464,7 @@ class RunService(RunManagementUseCase):
             str(run.mission_id),
             {"run_id": str(run.run_id), "status": run.status.value, "robot_id": run.robot_id},
         )
+        emit_mission_changed(self._events, run.mission_id)
 
     async def _offline(self, robot_id: str) -> bool:
         """True when the fleet holds the robot and its liveliness token is absent."""
