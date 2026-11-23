@@ -48,6 +48,7 @@ from leitstand_backend.ports.inbound.mission_management import (
     CreateMissionCommand,
     DeleteMissionCommand,
     NavigationStageInput,
+    ReplaceGeneratedStageCommand,
     RestoreMissionCommand,
     UnassignMissionCommand,
     UpdateMissionCommand,
@@ -1169,3 +1170,94 @@ async def test_a_navigation_input_reusing_a_coverage_id_is_refused_before_planni
         )
 
     assert svc.fake_planner.calls == []
+
+
+# --- every write announces the mission ----------------------------------------------------------
+
+
+def _announced(events):
+    return [entry for entry in events.published if entry[0].endswith(("/created", "/changed"))]
+
+
+async def _create_navigation(svc):
+    return await svc.create(CreateMissionCommand(name="m1", stages=[_wgs84_stage()]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("create", [_create_navigation, _coverage_mission])
+async def test_each_create_announces_the_mission_once(create):
+    svc, _, _, factsheets, events, _, _ = _make_svc()
+    factsheets.set(_factsheet())
+
+    mission = await create(svc)
+
+    assert _announced(events) == [
+        (
+            f"events/mission/{mission.mission_id}/created",
+            {"mission_id": str(mission.mission_id)},
+            False,
+        )
+    ]
+
+
+async def _update(svc, runs, m):
+    await svc.update(UpdateMissionCommand(mission_id=m.mission_id, name="renamed"))
+
+
+async def _replan(svc, runs, m):
+    await svc.replace_generated_stage(
+        ReplaceGeneratedStageCommand(mission_id=m.mission_id, stage=m.stages[0])
+    )
+
+
+async def _assign(svc, runs, m):
+    await svc.assign(AssignMissionCommand(mission_id=m.mission_id, robot_id=ROBOT_ID))
+
+
+async def _unassign(svc, runs, m):
+    await svc.unassign(UnassignMissionCommand(mission_id=m.mission_id))
+
+
+async def _delete(svc, runs, m):
+    await svc.delete(DeleteMissionCommand(mission_id=m.mission_id))
+
+
+async def _archive(svc, runs, m):
+    await _run_of(runs, m, RunStatus.SUCCEEDED)
+    await _delete(svc, runs, m)
+
+
+async def _restore(svc, runs, m):
+    await svc.restore(RestoreMissionCommand(mission_id=m.mission_id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make", "before", "write"),
+    [
+        (_create_navigation, None, _update),
+        (_coverage_mission, None, _replan),
+        (_create_navigation, None, _assign),
+        (_create_navigation, None, _unassign),
+        (_create_navigation, None, _delete),
+        (_create_navigation, None, _archive),
+        (_create_navigation, _archive, _restore),
+    ],
+)
+async def test_each_change_announces_the_mission_once(make, before, write):
+    svc, _, runs, factsheets, events, _, _ = _make_svc()
+    factsheets.set(_factsheet())
+    mission = await make(svc)
+    if before:
+        await before(svc, runs, mission)
+    events.published.clear()
+
+    await write(svc, runs, mission)
+
+    assert _announced(events) == [
+        (
+            f"events/mission/{mission.mission_id}/changed",
+            {"mission_id": str(mission.mission_id)},
+            False,
+        )
+    ]

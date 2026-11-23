@@ -1268,3 +1268,44 @@ async def test_a_finished_run_cannot_be_closed():
         await world.run_service.close(
             CloseRunCommand(mission_id=mission.mission_id, run_id=run.run_id)
         )
+
+
+async def _prepare(w):
+    mission = await w.mission()
+    w.events.published.clear()
+    await w.run_service.prepare(
+        StartRunCommand(mission_id=mission.mission_id, robot_id=ROBOT_A, origin=ORIGIN)
+    )
+    return mission.mission_id
+
+
+async def _annotate(w):
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    w.events.published.clear()
+    await w.run_service.annotate(AnnotateRunCommand(run_id=run.run_id, notes="note"))
+    return mission.mission_id
+
+
+async def _delete_finished(w):
+    from leitstand_backend.ports.inbound.run_management import DeleteRunCommand
+
+    mission = await w.mission()
+    run = await w.start(mission.mission_id)
+    await w.complete(run)
+    w.events.published.clear()
+    await w.run_service.delete(DeleteRunCommand(run_id=run.run_id))
+    return mission.mission_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", [_prepare, _annotate, _delete_finished])
+async def test_each_run_write_announces_its_mission_once(write):
+    w = _World()
+
+    mission_id = await write(w)
+
+    announced = [e for e in w.events.published if e[0].endswith(("/created", "/changed"))]
+    assert announced == [
+        (f"events/mission/{mission_id}/changed", {"mission_id": str(mission_id)}, False)
+    ]
